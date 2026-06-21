@@ -1,44 +1,72 @@
 /* ================================================================
-   Tab Out — Dashboard App (Pure Extension Edition)
+   Tab Out - Dashboard App (Firefox Edition)
 
    This file is the brain of the dashboard. Now that the dashboard
    IS the extension page (not inside an iframe), it can call
-   chrome.tabs and chrome.storage directly — no postMessage bridge needed.
+   browser.tabs and browser.storage directly - no postMessage bridge needed.
 
    What this file does:
-   1. Reads open browser tabs directly via chrome.tabs.query()
+   1. Reads open Firefox tabs directly via browser.tabs.query()
    2. Groups tabs by domain with a landing pages category
    3. Renders domain cards, banners, and stats
    4. Handles all user actions (close tabs, save for later, focus tab)
-   5. Stores "Saved for Later" tabs in chrome.storage.local (no server)
+   5. Stores "Saved for Later" tabs in browser.storage.local (no server)
    ================================================================ */
 
 'use strict';
 
 
 /* ----------------------------------------------------------------
-   CHROME TABS — Direct API Access
+   FIREFOX TABS - Direct API Access
 
    Since this page IS the extension's new tab page, it has full
-   access to chrome.tabs and chrome.storage. No middleman needed.
+   access to browser.tabs and browser.storage. No middleman needed.
    ---------------------------------------------------------------- */
 
 // All open tabs — populated by fetchOpenTabs()
 let openTabs = [];
 
+function getTabOutUrl() {
+  return browser.runtime.getURL('index.html');
+}
+
+function isTabOutUrl(url) {
+  return url === getTabOutUrl();
+}
+
+function isUserFacingTabUrl(url) {
+  if (!url) return false;
+
+  try {
+    return ['http:', 'https:', 'file:'].includes(new URL(url).protocol);
+  } catch {
+    return false;
+  }
+}
+
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, char => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;',
+  }[char]));
+}
+
+function safeHref(url) {
+  return isUserFacingTabUrl(url) ? escapeHtml(url) : '#';
+}
+
 /**
  * fetchOpenTabs()
  *
- * Reads all currently open browser tabs directly from Chrome.
- * Sets the extensionId flag so we can identify Tab Out's own pages.
+ * Reads all currently open Firefox tabs directly.
+ * Sets the isTabOut flag so we can identify Tab Out's own pages.
  */
 async function fetchOpenTabs() {
   try {
-    const extensionId = chrome.runtime.id;
-    // The new URL for this page is now index.html (not newtab.html)
-    const newtabUrl = `chrome-extension://${extensionId}/index.html`;
-
-    const tabs = await chrome.tabs.query({});
+    const tabs = await browser.tabs.query({});
     openTabs = tabs.map(t => ({
       id:       t.id,
       url:      t.url,
@@ -46,10 +74,10 @@ async function fetchOpenTabs() {
       windowId: t.windowId,
       active:   t.active,
       // Flag Tab Out's own pages so we can detect duplicate new tabs
-      isTabOut: t.url === newtabUrl || t.url === 'chrome://newtab/',
+      isTabOut: isTabOutUrl(t.url),
     }));
   } catch {
-    // chrome.tabs API unavailable (shouldn't happen in an extension page)
+    // browser.tabs API unavailable (shouldn't happen in an extension page)
     openTabs = [];
   }
 }
@@ -78,7 +106,7 @@ async function closeTabsByUrls(urls) {
     }
   }
 
-  const allTabs = await chrome.tabs.query({});
+  const allTabs = await browser.tabs.query({});
   const toClose = allTabs
     .filter(tab => {
       const tabUrl = tab.url || '';
@@ -90,7 +118,7 @@ async function closeTabsByUrls(urls) {
     })
     .map(tab => tab.id);
 
-  if (toClose.length > 0) await chrome.tabs.remove(toClose);
+  if (toClose.length > 0) await browser.tabs.remove(toClose);
   await fetchOpenTabs();
 }
 
@@ -103,22 +131,22 @@ async function closeTabsByUrls(urls) {
 async function closeTabsExact(urls) {
   if (!urls || urls.length === 0) return;
   const urlSet = new Set(urls);
-  const allTabs = await chrome.tabs.query({});
+  const allTabs = await browser.tabs.query({});
   const toClose = allTabs.filter(t => urlSet.has(t.url)).map(t => t.id);
-  if (toClose.length > 0) await chrome.tabs.remove(toClose);
+  if (toClose.length > 0) await browser.tabs.remove(toClose);
   await fetchOpenTabs();
 }
 
 /**
  * focusTab(url)
  *
- * Switches Chrome to the tab with the given URL (exact match first,
+ * Switches Firefox to the tab with the given URL (exact match first,
  * then hostname fallback). Also brings the window to the front.
  */
 async function focusTab(url) {
   if (!url) return;
-  const allTabs = await chrome.tabs.query({});
-  const currentWindow = await chrome.windows.getCurrent();
+  const allTabs = await browser.tabs.query({});
+  const currentWindow = await browser.windows.getCurrent();
 
   // Try exact URL match first
   let matches = allTabs.filter(t => t.url === url);
@@ -138,8 +166,8 @@ async function focusTab(url) {
 
   // Prefer a match in a different window so it actually switches windows
   const match = matches.find(t => t.windowId !== currentWindow.id) || matches[0];
-  await chrome.tabs.update(match.id, { active: true });
-  await chrome.windows.update(match.windowId, { focused: true });
+  await browser.tabs.update(match.id, { active: true });
+  await browser.windows.update(match.windowId, { focused: true });
 }
 
 /**
@@ -150,7 +178,7 @@ async function focusTab(url) {
  * keepOne=false → close all copies.
  */
 async function closeDuplicateTabs(urls, keepOne = true) {
-  const allTabs = await chrome.tabs.query({});
+  const allTabs = await browser.tabs.query({});
   const toClose = [];
 
   for (const url of urls) {
@@ -165,7 +193,7 @@ async function closeDuplicateTabs(urls, keepOne = true) {
     }
   }
 
-  if (toClose.length > 0) await chrome.tabs.remove(toClose);
+  if (toClose.length > 0) await browser.tabs.remove(toClose);
   await fetchOpenTabs();
 }
 
@@ -175,14 +203,9 @@ async function closeDuplicateTabs(urls, keepOne = true) {
  * Closes all duplicate Tab Out new-tab pages except the current one.
  */
 async function closeTabOutDupes() {
-  const extensionId = chrome.runtime.id;
-  const newtabUrl = `chrome-extension://${extensionId}/index.html`;
-
-  const allTabs = await chrome.tabs.query({});
-  const currentWindow = await chrome.windows.getCurrent();
-  const tabOutTabs = allTabs.filter(t =>
-    t.url === newtabUrl || t.url === 'chrome://newtab/'
-  );
+  const allTabs = await browser.tabs.query({});
+  const currentWindow = await browser.windows.getCurrent();
+  const tabOutTabs = allTabs.filter(t => isTabOutUrl(t.url));
 
   if (tabOutTabs.length <= 1) return;
 
@@ -193,15 +216,15 @@ async function closeTabOutDupes() {
     tabOutTabs.find(t => t.active) ||
     tabOutTabs[0];
   const toClose = tabOutTabs.filter(t => t.id !== keep.id).map(t => t.id);
-  if (toClose.length > 0) await chrome.tabs.remove(toClose);
+  if (toClose.length > 0) await browser.tabs.remove(toClose);
   await fetchOpenTabs();
 }
 
 
 /* ----------------------------------------------------------------
-   SAVED FOR LATER — chrome.storage.local
+   SAVED FOR LATER - browser.storage.local
 
-   Replaces the old server-side SQLite + REST API with Chrome's
+   Replaces the old server-side SQLite + REST API with Firefox's
    built-in key-value storage. Data persists across browser sessions
    and doesn't require a running server.
 
@@ -222,11 +245,11 @@ async function closeTabOutDupes() {
 /**
  * saveTabForLater(tab)
  *
- * Saves a single tab to the "Saved for Later" list in chrome.storage.local.
+ * Saves a single tab to the "Saved for Later" list in browser.storage.local.
  * @param {{ url: string, title: string }} tab
  */
 async function saveTabForLater(tab) {
-  const { deferred = [] } = await chrome.storage.local.get('deferred');
+  const { deferred = [] } = await browser.storage.local.get('deferred');
   deferred.push({
     id:        Date.now().toString(),
     url:       tab.url,
@@ -235,18 +258,18 @@ async function saveTabForLater(tab) {
     completed: false,
     dismissed: false,
   });
-  await chrome.storage.local.set({ deferred });
+  await browser.storage.local.set({ deferred });
 }
 
 /**
  * getSavedTabs()
  *
- * Returns all saved tabs from chrome.storage.local.
+ * Returns all saved tabs from browser.storage.local.
  * Filters out dismissed items (those are gone for good).
  * Splits into active (not completed) and archived (completed).
  */
 async function getSavedTabs() {
-  const { deferred = [] } = await chrome.storage.local.get('deferred');
+  const { deferred = [] } = await browser.storage.local.get('deferred');
   const visible = deferred.filter(t => !t.dismissed);
   return {
     active:   visible.filter(t => !t.completed),
@@ -260,12 +283,12 @@ async function getSavedTabs() {
  * Marks a saved tab as completed (checked off). It moves to the archive.
  */
 async function checkOffSavedTab(id) {
-  const { deferred = [] } = await chrome.storage.local.get('deferred');
+  const { deferred = [] } = await browser.storage.local.get('deferred');
   const tab = deferred.find(t => t.id === id);
   if (tab) {
     tab.completed = true;
     tab.completedAt = new Date().toISOString();
-    await chrome.storage.local.set({ deferred });
+    await browser.storage.local.set({ deferred });
   }
 }
 
@@ -275,11 +298,11 @@ async function checkOffSavedTab(id) {
  * Marks a saved tab as dismissed (removed from all lists).
  */
 async function dismissSavedTab(id) {
-  const { deferred = [] } = await chrome.storage.local.get('deferred');
+  const { deferred = [] } = await browser.storage.local.get('deferred');
   const tab = deferred.find(t => t.id === id);
   if (tab) {
     tab.dismissed = true;
-    await chrome.storage.local.set({ deferred });
+    await browser.storage.local.set({ deferred });
   }
 }
 
@@ -716,20 +739,10 @@ let domainGroups = [];
 /**
  * getRealTabs()
  *
- * Returns tabs that are real web pages — no chrome://, extension
- * pages, about:blank, etc.
+ * Returns tabs that are user-facing pages.
  */
 function getRealTabs() {
-  return openTabs.filter(t => {
-    const url = t.url || '';
-    return (
-      !url.startsWith('chrome://') &&
-      !url.startsWith('chrome-extension://') &&
-      !url.startsWith('about:') &&
-      !url.startsWith('edge://') &&
-      !url.startsWith('brave://')
-    );
-  });
+  return openTabs.filter(t => isUserFacingTabUrl(t.url));
 }
 
 /**
@@ -763,14 +776,11 @@ function buildOverflowChips(hiddenTabs, urlCounts = {}) {
     const count    = urlCounts[tab.url] || 1;
     const dupeTag  = count > 1 ? ` <span class="chip-dupe-badge">(${count}x)</span>` : '';
     const chipClass = count > 1 ? ' chip-has-dupes' : '';
-    const safeUrl   = (tab.url || '').replace(/"/g, '&quot;');
-    const safeTitle = label.replace(/"/g, '&quot;');
-    let domain = '';
-    try { domain = new URL(tab.url).hostname; } catch {}
-    const faviconUrl = domain ? `https://www.google.com/s2/favicons?domain=${domain}&sz=16` : '';
+    const safeUrl   = escapeHtml(tab.url || '');
+    const safeTitle = escapeHtml(label);
+    const safeLabel = escapeHtml(label);
     return `<div class="page-chip clickable${chipClass}" data-action="focus-tab" data-tab-url="${safeUrl}" title="${safeTitle}">
-      ${faviconUrl ? `<img class="chip-favicon" src="${faviconUrl}" alt="" onerror="this.style.display='none'">` : ''}
-      <span class="chip-text">${label}</span>${dupeTag}
+      <span class="chip-text">${safeLabel}</span>${dupeTag}
       <div class="chip-actions">
         <button class="chip-action chip-save" data-action="defer-single-tab" data-tab-url="${safeUrl}" data-tab-title="${safeTitle}" title="Save for later">
           <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M17.593 3.322c1.1.128 1.907 1.077 1.907 2.185V21L12 17.25 4.5 21V5.507c0-1.108.806-2.057 1.907-2.185a48.507 48.507 0 0 1 11.186 0Z" /></svg>
@@ -844,14 +854,11 @@ function renderDomainCard(group) {
     const count    = urlCounts[tab.url];
     const dupeTag  = count > 1 ? ` <span class="chip-dupe-badge">(${count}x)</span>` : '';
     const chipClass = count > 1 ? ' chip-has-dupes' : '';
-    const safeUrl   = (tab.url || '').replace(/"/g, '&quot;');
-    const safeTitle = label.replace(/"/g, '&quot;');
-    let domain = '';
-    try { domain = new URL(tab.url).hostname; } catch {}
-    const faviconUrl = domain ? `https://www.google.com/s2/favicons?domain=${domain}&sz=16` : '';
+    const safeUrl   = escapeHtml(tab.url || '');
+    const safeTitle = escapeHtml(label);
+    const safeLabel = escapeHtml(label);
     return `<div class="page-chip clickable${chipClass}" data-action="focus-tab" data-tab-url="${safeUrl}" title="${safeTitle}">
-      ${faviconUrl ? `<img class="chip-favicon" src="${faviconUrl}" alt="" onerror="this.style.display='none'">` : ''}
-      <span class="chip-text">${label}</span>${dupeTag}
+      <span class="chip-text">${safeLabel}</span>${dupeTag}
       <div class="chip-actions">
         <button class="chip-action chip-save" data-action="defer-single-tab" data-tab-url="${safeUrl}" data-tab-title="${safeTitle}" title="Save for later">
           <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M17.593 3.322c1.1.128 1.907 1.077 1.907 2.185V21L12 17.25 4.5 21V5.507c0-1.108.806-2.057 1.907-2.185a48.507 48.507 0 0 1 11.186 0Z" /></svg>
@@ -882,7 +889,7 @@ function renderDomainCard(group) {
       <div class="status-bar"></div>
       <div class="mission-content">
         <div class="mission-top">
-          <span class="mission-name">${isLanding ? 'Homepages' : (group.label || friendlyDomain(group.domain))}</span>
+          <span class="mission-name">${escapeHtml(isLanding ? 'Homepages' : (group.label || friendlyDomain(group.domain)))}</span>
           ${tabBadge}
           ${dupeBadge}
         </div>
@@ -904,7 +911,7 @@ function renderDomainCard(group) {
 /**
  * renderDeferredColumn()
  *
- * Reads saved tabs from chrome.storage.local and renders the right-side
+ * Reads saved tabs from browser.storage.local and renders the right-side
  * "Saved for Later" checklist column. Shows active items as a checklist
  * and completed items in a collapsible archive.
  */
@@ -966,22 +973,24 @@ async function renderDeferredColumn() {
 function renderDeferredItem(item) {
   let domain = '';
   try { domain = new URL(item.url).hostname.replace(/^www\./, ''); } catch {}
-  const faviconUrl = `https://www.google.com/s2/favicons?domain=${domain}&sz=16`;
   const ago = timeAgo(item.savedAt);
+  const safeId = escapeHtml(item.id);
+  const safeTitle = escapeHtml(item.title || item.url);
+  const safeUrl = safeHref(item.url);
 
   return `
-    <div class="deferred-item" data-deferred-id="${item.id}">
-      <input type="checkbox" class="deferred-checkbox" data-action="check-deferred" data-deferred-id="${item.id}">
+    <div class="deferred-item" data-deferred-id="${safeId}">
+      <input type="checkbox" class="deferred-checkbox" data-action="check-deferred" data-deferred-id="${safeId}">
       <div class="deferred-info">
-        <a href="${item.url}" target="_blank" rel="noopener" class="deferred-title" title="${(item.title || '').replace(/"/g, '&quot;')}">
-          <img src="${faviconUrl}" alt="" style="width:14px;height:14px;vertical-align:-2px;margin-right:4px" onerror="this.style.display='none'">${item.title || item.url}
+        <a href="${safeUrl}" target="_blank" rel="noopener" class="deferred-title" title="${safeTitle}">
+          ${safeTitle}
         </a>
         <div class="deferred-meta">
-          <span>${domain}</span>
+          <span>${escapeHtml(domain)}</span>
           <span>${ago}</span>
         </div>
       </div>
-      <button class="deferred-dismiss" data-action="dismiss-deferred" data-deferred-id="${item.id}" title="Dismiss">
+      <button class="deferred-dismiss" data-action="dismiss-deferred" data-deferred-id="${safeId}" title="Dismiss">
         <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18 18 6M6 6l12 12" /></svg>
       </button>
     </div>`;
@@ -994,10 +1003,12 @@ function renderDeferredItem(item) {
  */
 function renderArchiveItem(item) {
   const ago = item.completedAt ? timeAgo(item.completedAt) : timeAgo(item.savedAt);
+  const safeTitle = escapeHtml(item.title || item.url);
+  const safeUrl = safeHref(item.url);
   return `
     <div class="archive-item">
-      <a href="${item.url}" target="_blank" rel="noopener" class="archive-item-title" title="${(item.title || '').replace(/"/g, '&quot;')}">
-        ${item.title || item.url}
+      <a href="${safeUrl}" target="_blank" rel="noopener" class="archive-item-title" title="${safeTitle}">
+        ${safeTitle}
       </a>
       <span class="archive-item-date">${ago}</span>
     </div>`;
@@ -1013,7 +1024,7 @@ function renderArchiveItem(item) {
  *
  * The main render function:
  * 1. Paints greeting + date
- * 2. Fetches open tabs via chrome.tabs.query()
+ * 2. Fetches open tabs via browser.tabs.query()
  * 3. Groups tabs by domain (with landing pages pulled out to their own group)
  * 4. Renders domain cards
  * 5. Updates footer stats
@@ -1227,10 +1238,10 @@ document.addEventListener('click', async (e) => {
     const tabUrl = actionEl.dataset.tabUrl;
     if (!tabUrl) return;
 
-    // Close the tab in Chrome directly
-    const allTabs = await chrome.tabs.query({});
+    // Close the tab in Firefox directly
+    const allTabs = await browser.tabs.query({});
     const match   = allTabs.find(t => t.url === tabUrl);
-    if (match) await chrome.tabs.remove(match.id);
+    if (match) await browser.tabs.remove(match.id);
     await fetchOpenTabs();
 
     playCloseSound();
@@ -1271,7 +1282,7 @@ document.addEventListener('click', async (e) => {
     const tabTitle = actionEl.dataset.tabTitle || tabUrl;
     if (!tabUrl) return;
 
-    // Save to chrome.storage.local
+    // Save to browser.storage.local
     try {
       await saveTabForLater({ url: tabUrl, title: tabTitle });
     } catch (err) {
@@ -1280,10 +1291,10 @@ document.addEventListener('click', async (e) => {
       return;
     }
 
-    // Close the tab in Chrome
-    const allTabs = await chrome.tabs.query({});
+    // Close the tab in Firefox
+    const allTabs = await browser.tabs.query({});
     const match   = allTabs.find(t => t.url === tabUrl);
-    if (match) await chrome.tabs.remove(match.id);
+    if (match) await browser.tabs.remove(match.id);
     await fetchOpenTabs();
 
     // Animate chip out
@@ -1415,7 +1426,7 @@ document.addEventListener('click', async (e) => {
   // ---- Close ALL open tabs ----
   if (action === 'close-all-open-tabs') {
     const allUrls = openTabs
-      .filter(t => t.url && !t.url.startsWith('chrome') && !t.url.startsWith('about:'))
+      .filter(t => isUserFacingTabUrl(t.url))
       .map(t => t.url);
     await closeTabsByUrls(allUrls);
     playCloseSound();
@@ -1479,4 +1490,25 @@ document.addEventListener('input', async (e) => {
 /* ----------------------------------------------------------------
    INITIALIZE
    ---------------------------------------------------------------- */
-renderDashboard();
+async function loadLocalConfig() {
+  const configUrl = browser.runtime.getURL('config.local.js');
+
+  try {
+    const response = await fetch(configUrl, { cache: 'no-store' });
+    if (!response.ok) return;
+  } catch {
+    return;
+  }
+
+  await new Promise(resolve => {
+    const script = document.createElement('script');
+    script.src = configUrl;
+    script.onload = resolve;
+    script.onerror = resolve;
+    document.head.appendChild(script);
+  });
+}
+
+loadLocalConfig().finally(() => {
+  renderDashboard();
+});

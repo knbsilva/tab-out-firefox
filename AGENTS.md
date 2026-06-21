@@ -1,4 +1,4 @@
-# AGENTS.md -- Tab Out: Setup & Onboarding Guide for Coding Agents
+# AGENTS.md -- Tab Out: Firefox Setup & Onboarding Guide for Coding Agents
 
 You're installing **Tab Out** for the user. Your job is not just to set it up -- it's to get them excited about using it.
 
@@ -8,64 +8,68 @@ You're installing **Tab Out** for the user. Your job is not just to set it up --
 
 Before doing anything technical, tell the user what they're about to get:
 
-> **Tab Out** replaces your new tab page with a clean dashboard of everything you have open, grouped by domain.
+> **Tab Out** replaces your Firefox new tab page with a clean dashboard of everything you have open, grouped by domain.
 >
 > Here's what makes it great:
 > - **See all your open tabs at a glance** grouped by domain on a grid
 > - **Homepages group** pulls Gmail, X, LinkedIn, YouTube, GitHub homepages into one card for easy cleanup
 > - **Close tabs with style** satisfying swoosh sound + confetti burst
 > - **Duplicate detection** flags when you have the same page open twice
-> - **Click any tab title to jump to it** even across different Chrome windows
+> - **Click any tab title to jump to it** even across different Firefox windows
 > - **Save for later** bookmark individual tabs to a checklist before closing them
 > - **100% local** no server, no accounts, no data sent anywhere
 >
-> It's just a Chrome extension. Setup takes about 1 minute.
+> It's just a Firefox extension. Setup takes about 1 minute.
 
 ---
 
 ## Step 1 -- Clone the repo
 
 ```bash
-git clone https://github.com/zarazhangrui/tab-out.git
-cd tab-out
+git clone https://github.com/knbsilva/tab-out-firefox.git
+cd tab-out-firefox
 ```
 
 ---
 
-## Step 2 -- Install the Chrome extension
+## Step 2 -- Install the Firefox extension for testing
 
 This is the one step that requires manual action from the user. Make it as easy as possible.
 
-**First**, print the full path to the `extension/` folder:
+**First**, print the full path to the `manifest.json` file:
+
 ```bash
-echo "Extension folder: $(cd extension && pwd)"
+echo "Manifest file: $(cd extension && pwd)/manifest.json"
 ```
 
-**Then**, copy the `extension/` folder path to their clipboard:
-- macOS: `cd extension && pwd | pbcopy && echo "Path copied to clipboard"`
-- Linux: `cd extension && pwd | xclip -selection clipboard 2>/dev/null || echo "Path: $(pwd)"`
-- Windows: `cd extension && echo %CD% | clip`
+**Then**, copy the `manifest.json` path to their clipboard:
 
-**Then**, open the extensions page:
-```bash
-open "chrome://extensions"
-```
+- macOS: `(cd extension && printf "%s/manifest.json" "$(pwd)") | pbcopy && echo "Manifest path copied to clipboard"`
+- Linux: `(cd extension && printf "%s/manifest.json" "$(pwd)") | xclip -selection clipboard 2>/dev/null || echo "Manifest file: $(pwd)/manifest.json"`
+- Windows PowerShell: `(Resolve-Path extension\manifest.json).Path | Set-Clipboard; "Manifest path copied to clipboard"`
+
+**Then**, open Firefox's temporary add-on page:
+
+- macOS: `open -a Firefox "about:debugging#/runtime/this-firefox"`
+- Linux: `firefox "about:debugging#/runtime/this-firefox"`
+- Windows PowerShell: `Start-Process firefox "about:debugging#/runtime/this-firefox"`
 
 **Then**, walk the user through it step by step:
 
-> I've copied the extension folder path to your clipboard. Now:
+> I've copied the manifest file path to your clipboard. Now:
 >
-> 1. You should see Chrome's extensions page. In the **top-right corner**, toggle on **Developer mode** (it's a switch).
-> 2. Once Developer mode is on, you'll see a button called **"Load unpacked"** appear in the top-left. Click it.
-> 3. A file picker will open. **Press Cmd+Shift+G** (Mac) or **Ctrl+L** (Windows/Linux) to open the "Go to folder" bar, then **paste** the path I copied (Cmd+V / Ctrl+V) and press Enter.
-> 4. Click **"Select"** or **"Open"** and the extension will install.
+> 1. You should see Firefox's **This Firefox** debugging page.
+> 2. Click **"Load Temporary Add-on..."**.
+> 3. A file picker will open. **Press Cmd+Shift+G** (Mac) or **Ctrl+L** (Windows/Linux) to open the path bar, then **paste** the path I copied (Cmd+V / Ctrl+V) and press Enter.
+> 4. Select `manifest.json` if needed, then click **Open**.
 >
-> You should see "Tab Out" appear in your extensions list.
+> You should see "Tab Out" appear in the temporary extensions list.
 
 **Also**, open the file browser directly to the extension folder as a fallback:
+
 - macOS: `open extension/`
 - Linux: `xdg-open extension/`
-- Windows: `explorer extension\\`
+- Windows PowerShell: `explorer extension\`
 
 ---
 
@@ -90,7 +94,8 @@ Once the extension is loaded:
 
 ## Key Facts
 
-- Tab Out is a pure Chrome extension. No server, no Node.js, no npm.
-- Saved tabs are stored in `chrome.storage.local` (persists across sessions).
+- Tab Out is a pure Firefox extension. No server, no Node.js, no npm.
+- Saved tabs are stored in `browser.storage.local` (persists across sessions).
+- Temporary add-ons are removed when Firefox restarts; reload `extension/manifest.json` for another test session.
 - 100% local. No data is sent to any external service.
-- To update: `cd tab-out && git pull`, then reload the extension in `chrome://extensions`.
+- To update: `cd tab-out-firefox && git pull`, then reload the temporary extension in `about:debugging#/runtime/this-firefox`.

@@ -1,44 +1,40 @@
 /**
- * background.js — Service Worker for Badge Updates
+ * background.js - Firefox event page badge updates
  *
- * Chrome's "always-on" background script for Tab Out.
- * Its only job: keep the toolbar badge showing the current open tab count.
- *
- * Since we no longer have a server, we query chrome.tabs directly.
- * The badge counts real web tabs (skipping chrome:// and extension pages).
+ * Keeps the toolbar badge showing the current open tab count.
+ * The badge counts user-facing tabs and skips Firefox internal pages.
  *
  * Color coding gives a quick at-a-glance health signal:
- *   Green  (#3d7a4a) → 1–10 tabs  (focused, manageable)
- *   Amber  (#b8892e) → 11–20 tabs (getting busy)
- *   Red    (#b35a5a) → 21+ tabs   (time to cull!)
+ *   Green  (#3d7a4a) -> 1-10 tabs  (focused, manageable)
+ *   Amber  (#b8892e) -> 11-20 tabs (getting busy)
+ *   Red    (#b35a5a) -> 21+ tabs   (time to cull!)
  */
+
+function isUserFacingTabUrl(url) {
+  if (!url) return false;
+
+  try {
+    return ['http:', 'https:', 'file:'].includes(new URL(url).protocol);
+  } catch {
+    return false;
+  }
+}
 
 // ─── Badge updater ────────────────────────────────────────────────────────────
 
 /**
  * updateBadge()
  *
- * Counts open real-web tabs and updates the extension's toolbar badge.
- * "Real" tabs = not chrome://, not extension pages, not about:blank.
+ * Counts open user-facing tabs and updates the extension's toolbar badge.
  */
 async function updateBadge() {
   try {
-    const tabs = await chrome.tabs.query({});
+    const tabs = await browser.tabs.query({});
 
-    // Only count actual web pages — skip browser internals and extension pages
-    const count = tabs.filter(t => {
-      const url = t.url || '';
-      return (
-        !url.startsWith('chrome://') &&
-        !url.startsWith('chrome-extension://') &&
-        !url.startsWith('about:') &&
-        !url.startsWith('edge://') &&
-        !url.startsWith('brave://')
-      );
-    }).length;
+    const count = tabs.filter(t => isUserFacingTabUrl(t.url)).length;
 
     // Don't show "0" — an empty badge is cleaner
-    await chrome.action.setBadgeText({ text: count > 0 ? String(count) : '' });
+    await browser.action.setBadgeText({ text: count > 0 ? String(count) : '' });
 
     if (count === 0) return;
 
@@ -52,38 +48,38 @@ async function updateBadge() {
       color = '#b35a5a'; // Red — time to focus and close some tabs
     }
 
-    await chrome.action.setBadgeBackgroundColor({ color });
+    await browser.action.setBadgeBackgroundColor({ color });
 
   } catch {
     // If something goes wrong, clear the badge rather than show stale data
-    chrome.action.setBadgeText({ text: '' });
+    browser.action.setBadgeText({ text: '' });
   }
 }
 
 // ─── Event listeners ──────────────────────────────────────────────────────────
 
 // Update badge when the extension is first installed
-chrome.runtime.onInstalled.addListener(() => {
+browser.runtime.onInstalled.addListener(() => {
   updateBadge();
 });
 
-// Update badge when Chrome starts up
-chrome.runtime.onStartup.addListener(() => {
+// Update badge when Firefox starts up
+browser.runtime.onStartup.addListener(() => {
   updateBadge();
 });
 
 // Update badge whenever a tab is opened
-chrome.tabs.onCreated.addListener(() => {
+browser.tabs.onCreated.addListener(() => {
   updateBadge();
 });
 
 // Update badge whenever a tab is closed
-chrome.tabs.onRemoved.addListener(() => {
+browser.tabs.onRemoved.addListener(() => {
   updateBadge();
 });
 
-// Update badge when a tab's URL changes (e.g. navigating to/from chrome://)
-chrome.tabs.onUpdated.addListener(() => {
+// Update badge when a tab's URL changes
+browser.tabs.onUpdated.addListener(() => {
   updateBadge();
 });
 
