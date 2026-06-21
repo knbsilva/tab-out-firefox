@@ -1,14 +1,11 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
-  <!-- Rounded rectangle background in amber -->
-  <rect x="4" y="4" width="120" height="120" rx="24" ry="24" fill="#c8713a"/>
-  <!-- White "M" letter centered -->
-  <text
-    x="64"
-    y="90"
-    font-family="Georgia, serif"
-    font-size="80"
-    font-weight="bold"
-    fill="white"
-    text-anchor="middle"
-  >M</text>
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128" role="img" aria-label="Tab Out">
+  <rect x="8" y="8" width="112" height="112" rx="26" fill="#ffffff"/>
+  <rect x="8" y="8" width="112" height="112" rx="26" fill="none" stroke="#16202a" stroke-width="6"/>
+  <rect x="29" y="34" width="52" height="18" rx="7" fill="#2f6fed"/>
+  <rect x="29" y="56" width="64" height="18" rx="7" fill="#2f7d55"/>
+  <rect x="29" y="78" width="52" height="18" rx="7" fill="#f2b84b"/>
+  <path d="M73 38h23v23" fill="none" stroke="#16202a" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M95 39 68 66" fill="none" stroke="#16202a" stroke-width="8" stroke-linecap="round"/>
+  <circle cx="98" cy="34" r="8" fill="#ffffff"/>
+  <path d="M96 34h13v13" fill="none" stroke="#2f6fed" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
 </svg>
