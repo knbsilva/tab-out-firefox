@@ -19,6 +19,12 @@ const {
   normalizeSavedGroups,
 } = globalThis.TabOutSavedGroups;
 
+const {
+  EXPORT_KEYS,
+  buildExportPayload,
+  sanitizeImportPayload,
+} = globalThis.TabOutData;
+
 const BOOKMARK_FOLDER_TITLE = 'Tab Out';
 const BOOKMARK_FOLDER_KEY = 'tabOutBookmarkFolderId';
 const DEFERRED_KEY = 'deferred';
@@ -58,6 +64,7 @@ const state = {
     archiveQuery: '',
     archiveOpen: false,
     expandedGroups: {},
+    expandedSavedGroups: {},
   },
   refreshTimer: null,
   refreshInFlight: false,
@@ -117,7 +124,7 @@ function createBadge(className, text) {
 }
 
 function normalizeView(value) {
-  return ['groups', 'saved', 'saved-groups', 'favorites'].includes(value)
+  return ['groups', 'saved', 'saved-groups', 'favorites', 'data'].includes(value)
     ? value
     : 'groups';
 }
@@ -235,6 +242,12 @@ async function loadUiState() {
   if (!['tabout', 'all'].includes(state.ui.bookmarkMode)) {
     state.ui.bookmarkMode = 'tabout';
   }
+  if (!state.ui.expandedGroups || typeof state.ui.expandedGroups !== 'object') {
+    state.ui.expandedGroups = {};
+  }
+  if (!state.ui.expandedSavedGroups || typeof state.ui.expandedSavedGroups !== 'object') {
+    state.ui.expandedSavedGroups = {};
+  }
 
   const search = $('globalSearch');
   if (search) search.value = state.ui.query || '';
@@ -246,6 +259,60 @@ async function loadUiState() {
 
 async function persistUiState() {
   await browser.storage.local.set({ [UI_STATE_KEY]: state.ui });
+}
+
+function downloadJsonFile(payload, filename) {
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function readJsonFile(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        resolve(JSON.parse(String(reader.result || '{}')));
+      } catch (error) {
+        reject(error);
+      }
+    };
+    reader.onerror = () => reject(reader.error || new Error('Failed to read file'));
+    reader.readAsText(file);
+  });
+}
+
+async function exportTabOutData() {
+  const storage = await browser.storage.local.get(EXPORT_KEYS);
+  const payload = buildExportPayload(storage);
+  const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+  downloadJsonFile(payload, `tab-out-data-${stamp}.json`);
+  devLog('data.export', { keys: EXPORT_KEYS });
+  showToast('Exported Tab Out data');
+}
+
+async function importTabOutData(file) {
+  if (!file) return;
+  const payload = await readJsonFile(file);
+  const data = sanitizeImportPayload(payload);
+  const confirmed = window.confirm('Import Tab Out data and replace saved tabs, archive, saved groups, aliases and UI state? Firefox bookmarks will not be changed.');
+  if (!confirmed) return;
+
+  await browser.storage.local.set(data);
+  devLog('data.import', {
+    deferred: data.deferred.length,
+    savedGroups: data.tabOutSavedGroups.length,
+    aliases: Object.keys(data.tabOutGroupAliases).length,
+  });
+  showToast('Imported Tab Out data');
+  await loadUiState();
+  scheduleRefresh('data.import');
 }
 
 async function persistDeferred(next, reason) {
@@ -440,6 +507,34 @@ async function toggleBookmarkForTab(tab) {
   });
   devLog('bookmark.create-tabout', { url: tab.url, externalAlreadyExists: status.external });
   showToast(status.external ? 'Saved a Tab Out copy of this favorite' : 'Saved to favorites');
+}
+
+async function migrateVisibleBookmarksToTabOut() {
+  const queryResults = filterBookmarks(state.allBookmarks, state.ui.bookmarkQuery);
+  const candidates = queryResults.filter(bookmark =>
+    bookmark.parentId !== state.tabOutBookmarkFolderId &&
+    isUserFacingTabUrl(bookmark.url) &&
+    !bookmarkStatusForUrl(bookmark.url).tabOutBookmark
+  );
+
+  if (candidates.length === 0) {
+    showToast('No Firefox bookmarks to copy');
+    return;
+  }
+
+  const confirmed = window.confirm(`Copy ${candidates.length} Firefox bookmark${candidates.length !== 1 ? 's' : ''} to Tab Out favorites? Existing browser bookmarks will stay unchanged.`);
+  if (!confirmed) return;
+
+  const folderId = await ensureBookmarkFolder();
+  for (const bookmark of candidates) {
+    await browser.bookmarks.create({
+      parentId: folderId,
+      title: bookmark.title || bookmark.url,
+      url: bookmark.url,
+    });
+  }
+  devLog('bookmark.migrate-to-tabout', { count: candidates.length });
+  showToast(`Copied ${candidates.length} bookmark${candidates.length !== 1 ? 's' : ''} to Tab Out`);
 }
 
 async function closeTabOutDupes() {
@@ -790,7 +885,7 @@ function renderStats(reason) {
   const firefoxCount = groups.filter(group => group.type === 'firefox').length;
   const smartCount = groups.filter(group => group.type === 'smart').length;
   const duplicateGroups = groups.filter(group => group.duplicates.duplicateExtras > 0).length;
-  const bookmarkedTabs = state.realTabs.filter(tab => bookmarkStatusForUrl(tab.url).bookmarked).length;
+  const favoritedOpenTabs = state.realTabs.filter(tab => bookmarkStatusForUrl(tab.url).bookmarked).length;
 
   $('statTabs').textContent = state.realTabs.length;
   $('statGroups').textContent = groups.length;
@@ -800,7 +895,7 @@ function renderStats(reason) {
   $('countFirefox').textContent = firefoxCount;
   $('countSmart').textContent = smartCount;
   $('countDuplicates').textContent = duplicateGroups;
-  $('countBookmarked').textContent = bookmarkedTabs;
+  $('countBookmarked').textContent = favoritedOpenTabs;
   $('countSaved').textContent = state.deferredActive.length;
   $('countSavedGroups').textContent = state.savedGroups.length;
   $('countFavorites').textContent = state.allBookmarks.length;
@@ -831,6 +926,8 @@ function renderActiveView() {
 
   const groupFilters = $('groupFilterSection') || $('groupFilterRow');
   if (groupFilters) groupFilters.hidden = state.ui.view !== 'groups';
+  const tabFilters = $('tabFilterSection');
+  if (tabFilters) tabFilters.hidden = state.ui.view !== 'groups';
 }
 
 function renderTabOutDupeBanner() {
@@ -1028,6 +1125,10 @@ function renderSavedGroupsPanel() {
 function renderSavedGroupNode(snapshot) {
   const row = createNode('div', 'saved-group-row');
   row.dataset.snapshotId = snapshot.id;
+  const isExpanded = state.ui.expandedSavedGroups[snapshot.id] === true;
+
+  const summary = createNode('div', 'saved-group-summary');
+  summary.appendChild(createActionButton('toggle-saved-group', isExpanded ? '-' : '+', 'collapse-btn', { snapshotId: snapshot.id }, 'Show saved group tabs'));
 
   const main = createNode('div', 'saved-group-main');
   main.appendChild(createNode('span', '', snapshot.title));
@@ -1035,12 +1136,29 @@ function renderSavedGroupNode(snapshot) {
     ? ` - ${snapshot.sites.slice(0, 3).join(', ')}${snapshot.sites.length > 3 ? ` +${snapshot.sites.length - 3}` : ''}`
     : '';
   main.appendChild(createNode('small', '', `${snapshot.tabs.length} tab${snapshot.tabs.length !== 1 ? 's' : ''} - ${timeAgo(snapshot.createdAt)}${sites}`));
-  row.appendChild(main);
+  summary.appendChild(main);
 
   const actions = createNode('div', 'saved-group-actions');
   actions.appendChild(createActionButton('restore-saved-group', 'Restore', 'subtle-btn', { snapshotId: snapshot.id }));
   actions.appendChild(createActionButton('delete-saved-group', 'X', 'icon-only danger', { snapshotId: snapshot.id }, 'Delete saved group'));
-  row.appendChild(actions);
+  summary.appendChild(actions);
+  row.appendChild(summary);
+
+  if (isExpanded) {
+    const tabs = createNode('div', 'saved-group-tabs');
+    for (const tab of snapshot.tabs) {
+      const item = createNode('div', 'saved-group-tab');
+      const link = createNode('a', '', tab.title || tab.url);
+      link.href = safeHref(tab.url);
+      link.target = '_blank';
+      link.rel = 'noopener';
+      link.title = tab.url || '';
+      item.appendChild(link);
+      item.appendChild(createNode('span', '', tab.site || siteFromUrl(tab.url)));
+      tabs.appendChild(item);
+    }
+    row.appendChild(tabs);
+  }
   return row;
 }
 
@@ -1078,21 +1196,36 @@ function renderBookmarksPanel() {
   const empty = $('bookmarkEmpty');
   const count = $('bookmarkCount');
   const search = $('bookmarkSearch');
+  const migrateButton = $('migrateBookmarksButton');
   const mode = state.ui.bookmarkMode === 'all' ? 'all' : 'tabout';
   const source = mode === 'all' ? state.allBookmarks : state.tabOutBookmarks;
   const bookmarks = filterBookmarks(source, state.ui.bookmarkQuery);
+  const migrationCandidates = mode === 'all'
+    ? bookmarks.filter(bookmark =>
+      bookmark.parentId !== state.tabOutBookmarkFolderId &&
+      isUserFacingTabUrl(bookmark.url) &&
+      !bookmarkStatusForUrl(bookmark.url).tabOutBookmark
+    )
+    : [];
 
   document.querySelectorAll('[data-bookmark-mode]').forEach(button => {
     button.classList.toggle('active', button.dataset.bookmarkMode === mode);
   });
   if (search) {
-    search.placeholder = mode === 'all' ? 'Search all Firefox favorites' : 'Search Tab Out favorites';
+    search.placeholder = mode === 'all' ? 'Search Firefox bookmarks' : 'Search Tab Out favorites';
+  }
+  if (migrateButton) {
+    migrateButton.hidden = mode !== 'all';
+    migrateButton.disabled = migrationCandidates.length === 0;
+    migrateButton.textContent = migrationCandidates.length
+      ? `Copy ${migrationCandidates.length} Firefox result${migrationCandidates.length !== 1 ? 's' : ''} to Tab Out`
+      : 'No Firefox results to copy';
   }
 
   count.textContent = source.length;
   if (bookmarks.length === 0) {
     clearElement(list);
-    empty.textContent = mode === 'all' ? 'No Firefox favorites found.' : 'No Tab Out favorites yet.';
+    empty.textContent = mode === 'all' ? 'No Firefox bookmarks found.' : 'No Tab Out favorites yet.';
     empty.hidden = false;
     return;
   }
@@ -1160,6 +1293,14 @@ async function handleClick(event) {
       state.ui.expandedGroups[groupId] = state.ui.expandedGroups[groupId] === false;
       await persistUiState();
       renderGroups();
+      return;
+    }
+
+    if (action === 'toggle-saved-group') {
+      const snapshotId = actionEl.dataset.snapshotId;
+      state.ui.expandedSavedGroups[snapshotId] = state.ui.expandedSavedGroups[snapshotId] !== true;
+      await persistUiState();
+      renderSavedGroupsPanel();
       return;
     }
 
@@ -1301,6 +1442,24 @@ async function handleClick(event) {
       devLog('bookmark.remove-panel', { bookmarkId, url: bookmark.url });
       showToast('Removed favorite');
       scheduleRefresh('action.remove-bookmark');
+      return;
+    }
+
+    if (action === 'migrate-bookmarks') {
+      await migrateVisibleBookmarksToTabOut();
+      scheduleRefresh('action.migrate-bookmarks');
+      return;
+    }
+
+    if (action === 'export-data') {
+      await exportTabOutData();
+      return;
+    }
+
+    if (action === 'choose-import-data') {
+      const input = $('dataImportFile');
+      if (input) input.click();
+      return;
     }
   } catch (error) {
     console.error('[tab-out] action failed', action, error);
@@ -1326,6 +1485,22 @@ function handleInput(event) {
     state.ui.archiveQuery = target.value;
     persistUiState();
     renderSavedPanel();
+  }
+}
+
+function handleChange(event) {
+  const target = event.target;
+  if (target.id === 'dataImportFile') {
+    const [file] = target.files || [];
+    importTabOutData(file)
+      .catch(error => {
+        console.error('[tab-out] import failed', error);
+        devLog('data.import.failed', { message: error.message });
+        showToast('Import failed');
+      })
+      .finally(() => {
+        target.value = '';
+      });
   }
 }
 
@@ -1407,6 +1582,7 @@ async function loadLocalConfig() {
 async function init() {
   document.addEventListener('click', handleClick);
   document.addEventListener('input', handleInput);
+  document.addEventListener('change', handleChange);
   window.addEventListener('hashchange', () => {
     state.ui.view = normalizeView(new URLSearchParams(location.hash.slice(1)).get('view'));
     persistUiState();

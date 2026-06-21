@@ -8,9 +8,16 @@
 'use strict';
 
 const DASHBOARD_FILE = 'index.html';
+const BOOKMARK_FOLDER_TITLE = 'Tab Out';
+const BOOKMARK_FOLDER_KEY = 'tabOutBookmarkFolderId';
+const SAVED_GROUPS_KEY = 'tabOutSavedGroups';
 const DEV_LOG_KEY = '__tabOutDevLogs';
 const UI_STATE_KEY = 'tabOutUiState';
 const DEV_LOG_LIMIT = 300;
+
+const Grouping = globalThis.TabOutGrouping;
+const SavedGroups = globalThis.TabOutSavedGroups;
+const DataTools = globalThis.TabOutData;
 
 let logQueue = Promise.resolve();
 
@@ -25,7 +32,7 @@ function isUserFacingTabUrl(url) {
 }
 
 function normalizeView(value) {
-  return ['groups', 'saved', 'saved-groups', 'favorites'].includes(value)
+  return ['groups', 'saved', 'saved-groups', 'favorites', 'data'].includes(value)
     ? value
     : 'groups';
 }
@@ -123,6 +130,124 @@ function countBookmarkNodes(nodes) {
     if (node.children) count += countBookmarkNodes(node.children);
   }
   return count;
+}
+
+function flattenBookmarks(nodes, out = []) {
+  for (const node of nodes || []) {
+    out.push(node);
+    if (node.children) flattenBookmarks(node.children, out);
+  }
+  return out;
+}
+
+async function findWritableBookmarkParent() {
+  const tree = await browser.bookmarks.getTree();
+  const rootChildren = (tree[0] && tree[0].children) || [];
+  return rootChildren.find(node => node.type === 'folder' && !node.unmodifiable) ||
+    rootChildren.find(node => node.type === 'folder') ||
+    null;
+}
+
+async function ensureBookmarkFolder() {
+  const stored = await browser.storage.local.get(BOOKMARK_FOLDER_KEY);
+  if (stored[BOOKMARK_FOLDER_KEY]) {
+    try {
+      const [folder] = await browser.bookmarks.get(stored[BOOKMARK_FOLDER_KEY]);
+      if (folder && !folder.url) return folder.id;
+    } catch {
+      // Folder was deleted. Recreate below.
+    }
+  }
+
+  const tree = await browser.bookmarks.getTree();
+  const folders = flattenBookmarks(tree).filter(node => !node.url && node.title === BOOKMARK_FOLDER_TITLE);
+  const existing = folders.find(node => node.id !== 'root________') || folders[0];
+  if (existing) {
+    await browser.storage.local.set({ [BOOKMARK_FOLDER_KEY]: existing.id });
+    return existing.id;
+  }
+
+  const parent = await findWritableBookmarkParent();
+  if (!parent) throw new Error('No writable bookmark parent found');
+  const created = await browser.bookmarks.create({ parentId: parent.id, title: BOOKMARK_FOLDER_TITLE });
+  await browser.storage.local.set({ [BOOKMARK_FOLDER_KEY]: created.id });
+  return created.id;
+}
+
+async function getActiveUserTab() {
+  const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
+  if (!tab || !isUserFacingTabUrl(tab.url)) {
+    throw new Error('Open a regular web tab first');
+  }
+  return tab;
+}
+
+async function favoriteActiveTab() {
+  const tab = await getActiveUserTab();
+  const folderId = await ensureBookmarkFolder();
+  const existing = (await browser.bookmarks.getChildren(folderId))
+    .find(node => node.url === tab.url);
+
+  if (existing) {
+    devLog('popup.favorite-tab.exists', { url: tab.url });
+    return { alreadyExists: true, title: existing.title || tab.title || tab.url };
+  }
+
+  const bookmark = await browser.bookmarks.create({
+    parentId: folderId,
+    title: tab.title || tab.url,
+    url: tab.url,
+  });
+  devLog('popup.favorite-tab.created', { bookmarkId: bookmark.id, url: tab.url });
+  return { alreadyExists: false, title: bookmark.title || tab.title || tab.url };
+}
+
+async function favoriteActiveGroup() {
+  if (!Grouping || !SavedGroups) throw new Error('Grouping helpers unavailable');
+
+  const activeTab = await getActiveUserTab();
+  const tabs = await browser.tabs.query({});
+  const firefoxGroups = browser.tabGroups && browser.tabGroups.query
+    ? await browser.tabGroups.query({})
+    : [];
+  const stored = await browser.storage.local.get(['tabOutGroupAliases', SAVED_GROUPS_KEY]);
+  const aliases = stored.tabOutGroupAliases && typeof stored.tabOutGroupAliases === 'object'
+    ? stored.tabOutGroupAliases
+    : {};
+  const groups = SavedGroups.applyGroupAliases(
+    Grouping.groupTabs(tabs, firefoxGroups, { extensionUrl: dashboardUrl() }),
+    aliases
+  );
+  const group = groups.find(item => item.tabs.some(tab => tab.id === activeTab.id));
+  if (!group) throw new Error('No Tab Out group found for active tab');
+
+  const snapshot = SavedGroups.createGroupSnapshot(group);
+  if (!snapshot) throw new Error('No restorable tabs in active group');
+
+  const savedGroups = SavedGroups.normalizeSavedGroups(stored[SAVED_GROUPS_KEY]);
+  const next = SavedGroups.normalizeSavedGroups([snapshot, ...savedGroups]);
+  await browser.storage.local.set({ [SAVED_GROUPS_KEY]: next });
+  devLog('popup.favorite-group.created', { snapshotId: snapshot.id, title: snapshot.title, tabCount: snapshot.tabs.length });
+  return { title: snapshot.title, tabCount: snapshot.tabs.length };
+}
+
+async function exportTabOutData() {
+  const storage = await browser.storage.local.get(DataTools.EXPORT_KEYS);
+  const payload = DataTools.buildExportPayload(storage);
+  devLog('data.export.popup', { keys: DataTools.EXPORT_KEYS });
+  return payload;
+}
+
+async function importTabOutData(payload) {
+  const data = DataTools.sanitizeImportPayload(payload);
+  await browser.storage.local.set(data);
+  devLog('data.import.popup', {
+    deferred: data.deferred.length,
+    savedGroups: data.tabOutSavedGroups.length,
+    aliases: Object.keys(data.tabOutGroupAliases).length,
+  });
+  await notifyDashboard('data.import.popup');
+  return { ok: true };
 }
 
 async function getPopupSummary() {
@@ -267,6 +392,42 @@ function registerRuntimeMessages() {
         .then(() => ({ ok: true }))
         .catch(error => {
           devLog('popup.refresh.failed', { message: error.message });
+          return { ok: false, error: error.message };
+        });
+    }
+
+    if (message.type === 'tab-out:favorite-active-tab') {
+      return favoriteActiveTab()
+        .then(result => ({ ok: true, result }))
+        .catch(error => {
+          devLog('popup.favorite-tab.failed', { message: error.message });
+          return { ok: false, error: error.message };
+        });
+    }
+
+    if (message.type === 'tab-out:favorite-active-group') {
+      return favoriteActiveGroup()
+        .then(result => ({ ok: true, result }))
+        .catch(error => {
+          devLog('popup.favorite-group.failed', { message: error.message });
+          return { ok: false, error: error.message };
+        });
+    }
+
+    if (message.type === 'tab-out:export-data') {
+      return exportTabOutData()
+        .then(payload => ({ ok: true, payload }))
+        .catch(error => {
+          devLog('data.export.failed', { message: error.message });
+          return { ok: false, error: error.message };
+        });
+    }
+
+    if (message.type === 'tab-out:import-data') {
+      return importTabOutData(message.payload)
+        .then(result => ({ ok: true, result }))
+        .catch(error => {
+          devLog('data.import.failed', { message: error.message });
           return { ok: false, error: error.message };
         });
     }

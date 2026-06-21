@@ -628,7 +628,17 @@ svg {
 }
 
 .saved-group-row {
-  grid-template-columns: minmax(0, 1fr) auto;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+}
+
+.saved-group-summary {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
 }
 
 .saved-group-main {
@@ -657,6 +667,45 @@ svg {
   display: flex;
   align-items: center;
   gap: 4px;
+}
+
+.saved-group-tabs {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding-left: 34px;
+}
+
+.saved-group-tab {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(90px, auto);
+  gap: 8px;
+  align-items: center;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+}
+
+.saved-group-tab a {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+  text-decoration: none;
+}
+
+.saved-group-tab span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.data-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 10px;
 }
 
 .saved-row a,

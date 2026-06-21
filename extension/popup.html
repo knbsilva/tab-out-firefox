@@ -19,16 +19,17 @@
     <section class="popup-stats" aria-label="Summary">
       <div><strong id="popupTabs">0</strong><span>tabs</span></div>
       <div><strong id="popupSaved">0</strong><span>saved</span></div>
-      <div><strong id="popupGroups">0</strong><span>groups</span></div>
-      <div><strong id="popupFavorites">0</strong><span>favorites</span></div>
+      <div><strong id="popupGroups">0</strong><span>group saves</span></div>
+      <div><strong id="popupFavorites">0</strong><span>bookmarks</span></div>
     </section>
 
     <section class="popup-actions" aria-label="Actions">
-      <button data-action="open-view" data-view="groups">Open groups</button>
-      <button data-action="open-view" data-view="saved">Open saved</button>
-      <button data-action="open-view" data-view="saved-groups">Open saved groups</button>
-      <button data-action="open-view" data-view="favorites">Open favorites</button>
-      <button data-action="refresh">Refresh dashboard</button>
+      <button data-action="favorite-group">Favorite current group</button>
+      <button data-action="favorite-tab">Favorite current tab/site</button>
+      <button data-action="open-view" data-view="groups">Open Tab Out</button>
+      <button data-action="export-data">Export Tab Out data</button>
+      <button data-action="choose-import-data">Import Tab Out data</button>
+      <input id="popupImportFile" type="file" accept="application/json,.json" hidden>
     </section>
   </main>
 
