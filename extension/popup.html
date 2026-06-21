@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Tab Out</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <main class="popup-shell">
+    <header class="popup-header">
+      <img src="icons/icon48.png" alt="" width="32" height="32">
+      <div>
+        <h1>Tab Out</h1>
+        <span id="popupStatus">Loading</span>
+      </div>
+    </header>
+
+    <section class="popup-stats" aria-label="Summary">
+      <div><strong id="popupTabs">0</strong><span>tabs</span></div>
+      <div><strong id="popupSaved">0</strong><span>saved</span></div>
+      <div><strong id="popupGroups">0</strong><span>groups</span></div>
+      <div><strong id="popupFavorites">0</strong><span>favorites</span></div>
+    </section>
+
+    <section class="popup-actions" aria-label="Actions">
+      <button data-action="open-view" data-view="groups">Open groups</button>
+      <button data-action="open-view" data-view="saved">Open saved</button>
+      <button data-action="open-view" data-view="saved-groups">Open saved groups</button>
+      <button data-action="open-view" data-view="favorites">Open favorites</button>
+      <button data-action="refresh">Refresh dashboard</button>
+    </section>
+  </main>
+
+  <script src="popup.js"></script>
+</body>
+</html>

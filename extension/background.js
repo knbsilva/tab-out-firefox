@@ -24,8 +24,15 @@ function isUserFacingTabUrl(url) {
   }
 }
 
-function dashboardUrl() {
-  return browser.runtime.getURL(DASHBOARD_FILE);
+function normalizeView(value) {
+  return ['groups', 'saved', 'saved-groups', 'favorites'].includes(value)
+    ? value
+    : 'groups';
+}
+
+function dashboardUrl(view) {
+  const url = browser.runtime.getURL(DASHBOARD_FILE);
+  return view ? `${url}#view=${encodeURIComponent(normalizeView(view))}` : url;
 }
 
 function devLog(event, details = {}) {
@@ -88,22 +95,58 @@ async function notifyDashboard(reason, details = {}) {
   }
 }
 
-async function openOrFocusDashboard() {
-  const url = dashboardUrl();
+async function openOrFocusDashboard(view, source = 'dashboard') {
+  const url = dashboardUrl(view);
+  const baseUrl = dashboardUrl();
   const tabs = await browser.tabs.query({});
-  const existing = tabs.find(tab => tab.url === url);
+  const existing = tabs.find(tab => String(tab.url || '').startsWith(baseUrl));
 
   if (existing && existing.id != null) {
-    await browser.tabs.update(existing.id, { active: true });
+    const update = { active: true };
+    if (view) update.url = url;
+    await browser.tabs.update(existing.id, update);
     if (existing.windowId != null) {
       await browser.windows.update(existing.windowId, { focused: true });
     }
-    devLog('omnibox.focus-dashboard', { tabId: existing.id, windowId: existing.windowId });
+    devLog(`${source}.focus-dashboard`, { tabId: existing.id, windowId: existing.windowId, view: normalizeView(view) });
     return;
   }
 
   const tab = await browser.tabs.create({ url });
-  devLog('omnibox.open-dashboard', { tabId: tab.id, windowId: tab.windowId });
+  devLog(`${source}.open-dashboard`, { tabId: tab.id, windowId: tab.windowId, view: normalizeView(view) });
+}
+
+function countBookmarkNodes(nodes) {
+  let count = 0;
+  for (const node of nodes || []) {
+    if (node.url) count += 1;
+    if (node.children) count += countBookmarkNodes(node.children);
+  }
+  return count;
+}
+
+async function getPopupSummary() {
+  const tabs = await browser.tabs.query({});
+  const storage = await browser.storage.local.get(['deferred', 'tabOutSavedGroups']);
+  const deferred = Array.isArray(storage.deferred) ? storage.deferred : [];
+  const savedGroups = Array.isArray(storage.tabOutSavedGroups) ? storage.tabOutSavedGroups : [];
+  let favorites = 0;
+
+  if (browser.bookmarks && browser.bookmarks.getTree) {
+    try {
+      favorites = countBookmarkNodes(await browser.bookmarks.getTree());
+    } catch (error) {
+      devLog('popup.summary.bookmarks-failed', { message: error.message });
+    }
+  }
+
+  return {
+    tabs: tabs.filter(tab => isUserFacingTabUrl(tab.url)).length,
+    saved: deferred.filter(item => item && !item.completed && !item.dismissed).length,
+    archived: deferred.filter(item => item && item.completed && !item.dismissed).length,
+    savedGroups: savedGroups.length,
+    favorites,
+  };
 }
 
 function registerTabListeners() {
@@ -191,9 +234,44 @@ function registerOmnibox() {
   });
 
   browser.omnibox.onInputEntered.addListener(() => {
-    openOrFocusDashboard().catch(error => {
+    openOrFocusDashboard('groups', 'omnibox').catch(error => {
       devLog('omnibox.error', { message: error.message });
     });
+  });
+}
+
+function registerRuntimeMessages() {
+  browser.runtime.onMessage.addListener(message => {
+    if (!message || typeof message !== 'object') return false;
+
+    if (message.type === 'tab-out:open-dashboard') {
+      return openOrFocusDashboard(message.view, 'popup')
+        .then(() => ({ ok: true }))
+        .catch(error => {
+          devLog('popup.open-dashboard.failed', { message: error.message });
+          return { ok: false, error: error.message };
+        });
+    }
+
+    if (message.type === 'tab-out:popup-summary') {
+      return getPopupSummary()
+        .then(summary => ({ ok: true, summary }))
+        .catch(error => {
+          devLog('popup.summary.failed', { message: error.message });
+          return { ok: false, error: error.message };
+        });
+    }
+
+    if (message.type === 'tab-out:refresh-dashboard') {
+      return notifyDashboard('popup.refresh')
+        .then(() => ({ ok: true }))
+        .catch(error => {
+          devLog('popup.refresh.failed', { message: error.message });
+          return { ok: false, error: error.message };
+        });
+    }
+
+    return false;
   });
 }
 
@@ -210,5 +288,6 @@ registerTabGroupListeners();
 registerBookmarkListeners();
 registerStorageListener();
 registerOmnibox();
+registerRuntimeMessages();
 
 updateBadge();

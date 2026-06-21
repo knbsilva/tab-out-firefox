@@ -4,9 +4,9 @@
   "private": true,
   "description": "Firefox-only Tab Out extension.",
   "scripts": {
-    "check": "node --check extension/grouping.js && node --check extension/app.js && node --check extension/background.js && node tests/grouping.test.js",
+    "check": "node --check extension/grouping.js && node --check extension/saved-groups.js && node --check extension/app.js && node --check extension/background.js && node --check extension/popup.js && node tests/grouping.test.js && node tests/saved-groups.test.js",
     "lint:ext": "web-ext lint --source-dir extension --self-hosted",
-    "test": "node tests/grouping.test.js"
+    "test": "node tests/grouping.test.js && node tests/saved-groups.test.js"
   },
   "devDependencies": {
     "web-ext": "^10.4.0"

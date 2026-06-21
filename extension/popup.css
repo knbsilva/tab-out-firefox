@@ -1,0 +1,104 @@
+:root {
+  --bg: #f4f6f8;
+  --panel: #ffffff;
+  --panel-soft: #f8fafc;
+  --line: #d9e0e7;
+  --text: #16202a;
+  --muted: #667585;
+  --accent: #2f6fed;
+  --accent-soft: #e8f0ff;
+  --font-sans: "Segoe UI", Roboto, Arial, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  width: 320px;
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: 13px;
+}
+
+button {
+  font: inherit;
+  cursor: pointer;
+}
+
+.popup-shell {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+}
+
+.popup-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.popup-header img {
+  border-radius: 8px;
+}
+
+.popup-header h1 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.popup-header span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.popup-stats {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 6px;
+}
+
+.popup-stats div {
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  padding: 7px;
+}
+
+.popup-stats strong,
+.popup-stats span {
+  display: block;
+}
+
+.popup-stats strong {
+  font-size: 16px;
+}
+
+.popup-stats span {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.popup-actions {
+  display: grid;
+  gap: 6px;
+}
+
+.popup-actions button {
+  min-height: 34px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--text);
+  text-align: left;
+  padding: 8px 10px;
+}
+
+.popup-actions button:hover {
+  border-color: #b7cdfd;
+  background: var(--accent-soft);
+  color: var(--accent);
+}

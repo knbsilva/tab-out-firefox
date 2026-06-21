@@ -4,14 +4,15 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Tab Out</title>
+  <link rel="icon" href="icons/icon48.png">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
   <div class="app-shell">
     <header class="topbar">
       <div class="brand-block">
+        <img src="icons/icon48.png" alt="" width="36" height="36">
         <h1>Tab Out</h1>
-        <div class="muted" id="dateDisplay"></div>
       </div>
 
       <label class="search-box" for="globalSearch">
@@ -38,64 +39,98 @@
     </div>
 
     <main class="workspace">
-      <aside class="sidebar" aria-label="Filters">
-        <div class="sidebar-section">
+      <aside class="sidebar" aria-label="Dashboard navigation">
+        <section class="sidebar-section" aria-label="Views">
           <div class="sidebar-title">Views</div>
-          <button class="filter-btn active" data-action="set-filter" data-filter="all">All groups <span id="countAll">0</span></button>
-          <button class="filter-btn" data-action="set-filter" data-filter="firefox">Firefox groups <span id="countFirefox">0</span></button>
-          <button class="filter-btn" data-action="set-filter" data-filter="smart">Smart groups <span id="countSmart">0</span></button>
-          <button class="filter-btn" data-action="set-filter" data-filter="duplicates">Duplicates <span id="countDuplicates">0</span></button>
-          <button class="filter-btn" data-action="set-filter" data-filter="bookmarked">Bookmarked tabs <span id="countBookmarked">0</span></button>
-        </div>
+          <div class="view-grid">
+            <button class="view-btn active" data-action="set-view" data-view="groups">Groups <span id="countAll">0</span></button>
+            <button class="view-btn" data-action="set-view" data-view="saved">Saved <span id="countSaved">0</span></button>
+            <button class="view-btn" data-action="set-view" data-view="saved-groups">Saved groups <span id="countSavedGroups">0</span></button>
+            <button class="view-btn" data-action="set-view" data-view="favorites">Favorites <span id="countFavorites">0</span></button>
+          </div>
+        </section>
 
-        <div class="sidebar-section">
+        <section class="sidebar-section" id="groupFilterSection" aria-label="Group filters">
+          <div class="sidebar-title">Group filters</div>
+          <div class="group-filter-row" id="groupFilterRow">
+            <button class="filter-btn active" data-action="set-filter" data-filter="all">All <span id="countAllFilter">0</span></button>
+            <button class="filter-btn" data-action="set-filter" data-filter="firefox">Firefox <span id="countFirefox">0</span></button>
+            <button class="filter-btn" data-action="set-filter" data-filter="smart">Smart <span id="countSmart">0</span></button>
+            <button class="filter-btn" data-action="set-filter" data-filter="duplicates">Duplicates <span id="countDuplicates">0</span></button>
+            <button class="filter-btn" data-action="set-filter" data-filter="bookmarked">Bookmarked tabs <span id="countBookmarked">0</span></button>
+          </div>
+        </section>
+
+        <section class="sidebar-section" aria-label="Status">
           <div class="sidebar-title">Status</div>
           <div class="status-row"><span>Last refresh</span><strong id="lastRefresh">-</strong></div>
           <div class="status-row"><span>Alias</span><strong>to</strong></div>
-          <div class="status-row"><span>Dev logs</span><strong id="devLogCount">0</strong></div>
-        </div>
+        </section>
       </aside>
 
-      <section class="groups-panel" aria-label="Open tab groups">
-        <div class="panel-header">
-          <div>
-            <h2>Groups</h2>
-            <p id="groupsSummary">Loading tabs...</p>
+      <section class="dashboard-panel" aria-label="Tab Out dashboard">
+        <section class="content-panel" data-view-panel="groups" aria-label="Open tab groups">
+          <div class="panel-header">
+            <div>
+              <h2>Groups</h2>
+              <p id="groupsSummary">Loading tabs...</p>
+            </div>
+            <button class="danger-btn" data-action="close-all-open-tabs">Close all tabs</button>
           </div>
-          <button class="danger-btn" data-action="close-all-open-tabs">Close all tabs</button>
-        </div>
-        <div class="groups-list" id="groupsList"></div>
-        <div class="empty-state" id="emptyGroups" hidden>
-          <strong>No open web tabs</strong>
-          <span>Open a few pages and Tab Out will group them here.</span>
-        </div>
-      </section>
+          <div class="groups-list" id="groupsList"></div>
+          <div class="empty-state" id="emptyGroups" hidden>
+            <strong>No open web tabs</strong>
+            <span>Open a few pages and Tab Out will group them here.</span>
+          </div>
+        </section>
 
-      <aside class="side-panel" aria-label="Saved tabs and favorites">
-        <section class="panel-card">
-          <div class="panel-card-header">
-            <h2>Saved</h2>
-            <span id="deferredCount">0</span>
+        <section class="content-panel" data-view-panel="saved" aria-label="Saved tabs" hidden>
+          <div class="panel-header">
+            <div>
+              <h2>Saved</h2>
+              <p>Saved tabs and archive.</p>
+            </div>
+            <span class="panel-count" id="deferredCount">0</span>
           </div>
           <div class="deferred-list" id="deferredList"></div>
           <div class="empty-inline" id="deferredEmpty">Nothing saved.</div>
           <button class="subtle-btn archive-toggle" id="archiveToggle" data-action="toggle-archive">Archive <span id="archiveCount"></span></button>
           <div class="archive-body" id="archiveBody" hidden>
+            <button class="danger-btn compact-action" id="clearArchiveButton" data-action="clear-archive">Clear archive</button>
             <input type="search" id="archiveSearch" class="compact-input" placeholder="Search archive">
             <div class="archive-list" id="archiveList"></div>
           </div>
         </section>
 
-        <section class="panel-card">
-          <div class="panel-card-header">
-            <h2>Favorites</h2>
-            <span id="bookmarkCount">0</span>
+        <section class="content-panel" data-view-panel="saved-groups" aria-label="Saved groups" hidden>
+          <div class="panel-header">
+            <div>
+              <h2>Saved groups</h2>
+              <p>Restorable snapshots of Firefox and Tab Out groups.</p>
+            </div>
+            <span class="panel-count" id="savedGroupCount">0</span>
+          </div>
+          <div class="saved-group-list" id="savedGroupList"></div>
+          <div class="empty-inline" id="savedGroupEmpty">No saved groups yet.</div>
+        </section>
+
+        <section class="content-panel" data-view-panel="favorites" aria-label="Favorites" hidden>
+          <div class="panel-header">
+            <div>
+              <h2>Favorites</h2>
+              <p>Tab Out folder or all Firefox bookmarks.</p>
+            </div>
+            <span class="panel-count" id="bookmarkCount">0</span>
+          </div>
+          <div class="segmented-control" aria-label="Favorites mode">
+            <button class="active" data-action="set-bookmark-mode" data-bookmark-mode="tabout">Tab Out</button>
+            <button data-action="set-bookmark-mode" data-bookmark-mode="all">All</button>
           </div>
           <input type="search" id="bookmarkSearch" class="compact-input" placeholder="Search Tab Out favorites">
           <div class="bookmark-list" id="bookmarkList"></div>
           <div class="empty-inline" id="bookmarkEmpty">No Tab Out favorites yet.</div>
         </section>
-      </aside>
+      </section>
     </main>
   </div>
 
@@ -104,6 +139,7 @@
   </div>
 
   <script src="grouping.js"></script>
+  <script src="saved-groups.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
