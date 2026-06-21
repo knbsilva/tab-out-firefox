@@ -4,124 +4,106 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Tab Out</title>
-
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
-<div class="container">
-
-
-
-  <!-- ================================================================
-       HEADER — greeting on the left
-       ================================================================ -->
-  <header>
-    <div class="header-left">
-      <!-- "Good afternoon" — written by getGreeting() in app.js -->
-      <h1 id="greeting"></h1>
-      <!-- "Friday, April 4, 2026" — written by getDateDisplay() in app.js -->
-      <div class="date" id="dateDisplay"></div>
-    </div>
-  </header>
-
-  <!-- ================================================================
-       TAB OUT DUPES BANNER — appears when you have extra Tab Out tabs open
-       Hidden by default; app.js shows it when dupeTabOutCount > 1
-       ================================================================ -->
-  <div class="tab-cleanup-banner" id="tabOutDupeBanner" style="display:none">
-    <div class="tab-cleanup-left">
-      <div class="tab-cleanup-icon">
-        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
-          <path stroke-linecap="round" stroke-linejoin="round" d="M15.75 17.25v3.375c0 .621-.504 1.125-1.125 1.125h-9.75a1.125 1.125 0 0 1-1.125-1.125V7.875c0-.621.504-1.125 1.125-1.125H6.75a9.06 9.06 0 0 1 1.5.124m7.5 10.376h3.375c.621 0 1.125-.504 1.125-1.125V11.25c0-4.46-3.243-8.161-7.5-8.876a9.06 9.06 0 0 0-1.5-.124H9.375c-.621 0-1.125.504-1.125 1.125v3.5m7.5 10.375H9.375a1.125 1.125 0 0 1-1.125-1.125v-9.25m12 6.625v-1.875a3.375 3.375 0 0 0-3.375-3.375h-1.5a1.125 1.125 0 0 1-1.125-1.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H9.75" />
-        </svg>
-      </div>
-      <div class="tab-cleanup-text">
-        You have <strong id="tabOutDupeCount"></strong> Tab Out tabs open. Keep just this one?
-      </div>
-    </div>
-    <button class="tab-cleanup-btn" data-action="close-tabout-dupes">Close extras</button>
-  </div>
-
-  <!-- ================================================================
-       MAIN CONTENT AREA — two-column layout
-       Left: open tabs (domain/mission cards)
-       Right: saved for later checklist
-       The right column only renders when it has items (JS controls this)
-       ================================================================ -->
-  <div class="dashboard-columns" id="dashboardColumns">
-
-    <!-- LEFT COLUMN: Open tabs -->
-    <div class="active-section" id="openTabsSection" style="display:none">
-      <div class="section-header">
-        <h2 id="openTabsSectionTitle">Right now</h2>
-        <div class="section-line"></div>
-        <div class="section-count" id="openTabsSectionCount"></div>
-      </div>
-      <div class="missions" id="openTabsMissions"></div>
-    </div>
-
-    <!-- RIGHT COLUMN: Saved for Later checklist -->
-    <div class="deferred-column" id="deferredColumn" style="display:none">
-      <div class="section-header">
-        <h2>Saved for later</h2>
-        <div class="section-line"></div>
-        <div class="section-count" id="deferredCount"></div>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="brand-block">
+        <h1>Tab Out</h1>
+        <div class="muted" id="dateDisplay"></div>
       </div>
 
-      <!-- Active checklist items — injected by renderDeferredList() in app.js -->
-      <div class="deferred-list" id="deferredList"></div>
+      <label class="search-box" for="globalSearch">
+        <span>Search</span>
+        <input id="globalSearch" type="search" autocomplete="off" placeholder="Tabs, sites, groups, favorites">
+      </label>
 
-      <!-- Empty state — shown when no active deferred tabs -->
-      <div class="deferred-empty" id="deferredEmpty" style="display:none">
-        Nothing saved. Living in the moment.
-      </div>
-
-      <!-- Archive section — collapsed by default -->
-      <div class="deferred-archive" id="deferredArchive" style="display:none">
-        <button class="archive-toggle" id="archiveToggle">
-          <svg class="archive-chevron" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="m19.5 8.25-7.5 7.5-7.5-7.5" /></svg>
-          Archive
-          <span class="archive-count" id="archiveCount"></span>
-        </button>
-        <div class="archive-body" id="archiveBody" style="display:none">
-          <input type="text" class="archive-search" id="archiveSearch" placeholder="Search archived tabs...">
-          <div class="archive-list" id="archiveList"></div>
+      <div class="topbar-actions">
+        <button class="icon-btn" id="manualRefresh" data-action="manual-refresh" title="Refresh now">Refresh</button>
+        <div class="stat-strip">
+          <div><strong id="statTabs">0</strong><span>tabs</span></div>
+          <div><strong id="statGroups">0</strong><span>groups</span></div>
+          <div><strong id="statBookmarks">0</strong><span>favorites</span></div>
         </div>
       </div>
-    </div>
+    </header>
 
-  </div><!-- end .dashboard-columns -->
-
-  <!-- ================================================================
-       FOOTER — global stats + refresh control
-       ================================================================ -->
-  <footer>
-    <div class="footer-stats">
-      <div class="stat">
-        <div class="stat-num" id="statTabs">—</div>
-        <div class="stat-label">Open tabs</div>
+    <div class="tab-cleanup-banner" id="tabOutDupeBanner" hidden>
+      <div>
+        <strong id="tabOutDupeCount"></strong> Tab Out tabs are open.
+        <span>Keep the current dashboard and close the extras.</span>
       </div>
+      <button class="primary-btn" data-action="close-tabout-dupes">Close extras</button>
     </div>
-    <div class="last-refresh">
-      <span style="color: var(--muted); font-size: 11px;"><a href="https://github.com/knbsilva/tab-out-firefox" target="_top" style="color: var(--muted); text-decoration: underline; text-underline-offset: 2px;">Tab Out Firefox</a> by <a href="https://x.com/zarazhangrui" target="_top" style="color: var(--muted); text-decoration: underline; text-underline-offset: 2px;">Zara</a></span>
-    </div>
-  </footer>
 
-</div><!-- end .container -->
+    <main class="workspace">
+      <aside class="sidebar" aria-label="Filters">
+        <div class="sidebar-section">
+          <div class="sidebar-title">Views</div>
+          <button class="filter-btn active" data-action="set-filter" data-filter="all">All groups <span id="countAll">0</span></button>
+          <button class="filter-btn" data-action="set-filter" data-filter="firefox">Firefox groups <span id="countFirefox">0</span></button>
+          <button class="filter-btn" data-action="set-filter" data-filter="smart">Smart groups <span id="countSmart">0</span></button>
+          <button class="filter-btn" data-action="set-filter" data-filter="duplicates">Duplicates <span id="countDuplicates">0</span></button>
+          <button class="filter-btn" data-action="set-filter" data-filter="bookmarked">Bookmarked tabs <span id="countBookmarked">0</span></button>
+        </div>
 
-<!-- ================================================================
-     TOAST — floats above everything, used for action confirmations
-     Hidden by default via CSS (opacity:0, translateY)
-     ================================================================ -->
-<div class="toast" id="toast">
-  <!-- Checkmark circle icon (Heroicons outline) -->
-  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor">
-    <path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75 11.25 15 15 9.75M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />
-  </svg>
-  <span id="toastText"></span>
-</div>
+        <div class="sidebar-section">
+          <div class="sidebar-title">Status</div>
+          <div class="status-row"><span>Last refresh</span><strong id="lastRefresh">-</strong></div>
+          <div class="status-row"><span>Alias</span><strong>to</strong></div>
+          <div class="status-row"><span>Dev logs</span><strong id="devLogCount">0</strong></div>
+        </div>
+      </aside>
 
-<!-- Main dashboard logic — loads last so the DOM is ready -->
-<script src="app.js"></script>
+      <section class="groups-panel" aria-label="Open tab groups">
+        <div class="panel-header">
+          <div>
+            <h2>Groups</h2>
+            <p id="groupsSummary">Loading tabs...</p>
+          </div>
+          <button class="danger-btn" data-action="close-all-open-tabs">Close all tabs</button>
+        </div>
+        <div class="groups-list" id="groupsList"></div>
+        <div class="empty-state" id="emptyGroups" hidden>
+          <strong>No open web tabs</strong>
+          <span>Open a few pages and Tab Out will group them here.</span>
+        </div>
+      </section>
+
+      <aside class="side-panel" aria-label="Saved tabs and favorites">
+        <section class="panel-card">
+          <div class="panel-card-header">
+            <h2>Saved</h2>
+            <span id="deferredCount">0</span>
+          </div>
+          <div class="deferred-list" id="deferredList"></div>
+          <div class="empty-inline" id="deferredEmpty">Nothing saved.</div>
+          <button class="subtle-btn archive-toggle" id="archiveToggle" data-action="toggle-archive">Archive <span id="archiveCount"></span></button>
+          <div class="archive-body" id="archiveBody" hidden>
+            <input type="search" id="archiveSearch" class="compact-input" placeholder="Search archive">
+            <div class="archive-list" id="archiveList"></div>
+          </div>
+        </section>
+
+        <section class="panel-card">
+          <div class="panel-card-header">
+            <h2>Favorites</h2>
+            <span id="bookmarkCount">0</span>
+          </div>
+          <input type="search" id="bookmarkSearch" class="compact-input" placeholder="Search Tab Out favorites">
+          <div class="bookmark-list" id="bookmarkList"></div>
+          <div class="empty-inline" id="bookmarkEmpty">No Tab Out favorites yet.</div>
+        </section>
+      </aside>
+    </main>
+  </div>
+
+  <div class="toast" id="toast" role="status" aria-live="polite">
+    <span id="toastText"></span>
+  </div>
+
+  <script src="grouping.js"></script>
+  <script src="app.js"></script>
 </body>
 </html>

@@ -1,47 +1,56 @@
-/* ================================================================
-   Tab Out - Dashboard App (Firefox Edition)
-
-   This file is the brain of the dashboard. Now that the dashboard
-   IS the extension page (not inside an iframe), it can call
-   browser.tabs and browser.storage directly - no postMessage bridge needed.
-
-   What this file does:
-   1. Reads open Firefox tabs directly via browser.tabs.query()
-   2. Groups tabs by domain with a landing pages category
-   3. Renders domain cards, banners, and stats
-   4. Handles all user actions (close tabs, save for later, focus tab)
-   5. Stores "Saved for Later" tabs in browser.storage.local (no server)
-   ================================================================ */
+/* Tab Out - Firefox dashboard app */
 
 'use strict';
 
+const {
+  TAB_GROUP_NONE,
+  groupTabs,
+  isUserFacingTabUrl,
+  normalizeUrlKey,
+  siteFromUrl,
+} = globalThis.TabOutGrouping;
 
-/* ----------------------------------------------------------------
-   FIREFOX TABS - Direct API Access
+const BOOKMARK_FOLDER_TITLE = 'Tab Out';
+const BOOKMARK_FOLDER_KEY = 'tabOutBookmarkFolderId';
+const UI_STATE_KEY = 'tabOutUiState';
+const DEV_LOG_KEY = '__tabOutDevLogs';
+const DEV_LOG_LIMIT = 300;
 
-   Since this page IS the extension's new tab page, it has full
-   access to browser.tabs and browser.storage. No middleman needed.
-   ---------------------------------------------------------------- */
+const ICONS = {
+  star: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 2.76 5.59 6.17.9-4.47 4.35 1.06 6.14L12 17.08l-5.52 2.9 1.06-6.14-4.47-4.35 6.17-.9L12 3Z"/></svg>',
+  bookmark: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 4.75A2.75 2.75 0 0 1 8.75 2h6.5A2.75 2.75 0 0 1 18 4.75V21l-6-3.4L6 21V4.75Z"/></svg>',
+  close: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>',
+  focus: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 19 14-14M9 5h10v10"/></svg>',
+  group: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7.5A2.5 2.5 0 0 1 6.5 5h11A2.5 2.5 0 0 1 20 7.5v9a2.5 2.5 0 0 1-2.5 2.5h-11A2.5 2.5 0 0 1 4 16.5v-9Zm3-5h10"/></svg>',
+};
 
-// All open tabs — populated by fetchOpenTabs()
-let openTabs = [];
+const state = {
+  allTabs: [],
+  realTabs: [],
+  firefoxGroups: [],
+  groups: [],
+  deferredActive: [],
+  deferredArchived: [],
+  bookmarkIndex: new Map(),
+  tabOutBookmarks: [],
+  tabOutBookmarkFolderId: null,
+  ui: {
+    filter: 'all',
+    query: '',
+    bookmarkQuery: '',
+    archiveQuery: '',
+    archiveOpen: false,
+    expandedGroups: {},
+  },
+  refreshTimer: null,
+  refreshInFlight: false,
+  pendingReason: null,
+};
 
-function getTabOutUrl() {
-  return browser.runtime.getURL('index.html');
-}
+let logQueue = Promise.resolve();
 
-function isTabOutUrl(url) {
-  return url === getTabOutUrl();
-}
-
-function isUserFacingTabUrl(url) {
-  if (!url) return false;
-
-  try {
-    return ['http:', 'https:', 'file:'].includes(new URL(url).protocol);
-  } catch {
-    return false;
-  }
+function $(id) {
+  return document.getElementById(id);
 }
 
 function escapeHtml(value) {
@@ -54,1442 +63,980 @@ function escapeHtml(value) {
   }[char]));
 }
 
+function attr(value) {
+  return escapeHtml(value);
+}
+
 function safeHref(url) {
-  return isUserFacingTabUrl(url) ? escapeHtml(url) : '#';
+  return isUserFacingTabUrl(url) ? url : '#';
 }
 
-/**
- * fetchOpenTabs()
- *
- * Reads all currently open Firefox tabs directly.
- * Sets the isTabOut flag so we can identify Tab Out's own pages.
- */
-async function fetchOpenTabs() {
-  try {
-    const tabs = await browser.tabs.query({});
-    openTabs = tabs.map(t => ({
-      id:       t.id,
-      url:      t.url,
-      title:    t.title,
-      windowId: t.windowId,
-      active:   t.active,
-      // Flag Tab Out's own pages so we can detect duplicate new tabs
-      isTabOut: isTabOutUrl(t.url),
-    }));
-  } catch {
-    // browser.tabs API unavailable (shouldn't happen in an extension page)
-    openTabs = [];
+function clearElement(element) {
+  while (element && element.firstChild) {
+    element.removeChild(element.firstChild);
   }
 }
 
-/**
- * closeTabsByUrls(urls)
- *
- * Closes all open tabs whose hostname matches any of the given URLs.
- * After closing, re-fetches the tab list to keep our state accurate.
- *
- * Special case: file:// URLs are matched exactly (they have no hostname).
- */
-async function closeTabsByUrls(urls) {
-  if (!urls || urls.length === 0) return;
+function createNode(tagName, className, text) {
+  const node = document.createElement(tagName);
+  if (className) node.className = className;
+  if (text != null) node.textContent = text;
+  return node;
+}
 
-  // Separate file:// URLs (exact match) from regular URLs (hostname match)
-  const targetHostnames = [];
-  const exactUrls = new Set();
-
-  for (const u of urls) {
-    if (u.startsWith('file://')) {
-      exactUrls.add(u);
-    } else {
-      try { targetHostnames.push(new URL(u).hostname); }
-      catch { /* skip unparseable */ }
-    }
+function createActionButton(action, text, className, dataset = {}, title = '') {
+  const button = createNode('button', className, text);
+  button.type = 'button';
+  button.dataset.action = action;
+  for (const [key, value] of Object.entries(dataset)) {
+    button.dataset[key] = String(value);
   }
+  if (title) button.title = title;
+  return button;
+}
 
-  const allTabs = await browser.tabs.query({});
-  const toClose = allTabs
-    .filter(tab => {
-      const tabUrl = tab.url || '';
-      if (tabUrl.startsWith('file://') && exactUrls.has(tabUrl)) return true;
-      try {
-        const tabHostname = new URL(tabUrl).hostname;
-        return tabHostname && targetHostnames.includes(tabHostname);
-      } catch { return false; }
+function createBadge(className, text) {
+  return createNode('span', className, text);
+}
+
+function dashboardUrl() {
+  return browser.runtime.getURL('index.html');
+}
+
+function urlKey(url) {
+  return normalizeUrlKey(url);
+}
+
+function nowTime() {
+  return new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+}
+
+function devLog(event, details = {}) {
+  const entry = {
+    ts: new Date().toISOString(),
+    source: 'dashboard',
+    event,
+    details,
+  };
+
+  console.log('[tab-out:dev]', event, details);
+
+  logQueue = logQueue
+    .then(async () => {
+      const data = await browser.storage.local.get(DEV_LOG_KEY);
+      const logs = Array.isArray(data[DEV_LOG_KEY]) ? data[DEV_LOG_KEY] : [];
+      logs.push(entry);
+      await browser.storage.local.set({ [DEV_LOG_KEY]: logs.slice(-DEV_LOG_LIMIT) });
     })
-    .map(tab => tab.id);
-
-  if (toClose.length > 0) await browser.tabs.remove(toClose);
-  await fetchOpenTabs();
+    .catch(error => {
+      console.warn('[tab-out:dev] failed to persist log', error);
+    });
 }
 
-/**
- * closeTabsExact(urls)
- *
- * Closes tabs by exact URL match (not hostname). Used for landing pages
- * so closing "Gmail inbox" doesn't also close individual email threads.
- */
-async function closeTabsExact(urls) {
-  if (!urls || urls.length === 0) return;
-  const urlSet = new Set(urls);
-  const allTabs = await browser.tabs.query({});
-  const toClose = allTabs.filter(t => urlSet.has(t.url)).map(t => t.id);
-  if (toClose.length > 0) await browser.tabs.remove(toClose);
-  await fetchOpenTabs();
+function showToast(message) {
+  const toast = $('toast');
+  const text = $('toastText');
+  if (!toast || !text) return;
+
+  text.textContent = message;
+  toast.classList.add('visible');
+  clearTimeout(showToast.timer);
+  showToast.timer = setTimeout(() => toast.classList.remove('visible'), 2200);
 }
 
-/**
- * focusTab(url)
- *
- * Switches Firefox to the tab with the given URL (exact match first,
- * then hostname fallback). Also brings the window to the front.
- */
-async function focusTab(url) {
-  if (!url) return;
-  const allTabs = await browser.tabs.query({});
-  const currentWindow = await browser.windows.getCurrent();
+function timeAgo(isoString) {
+  const time = new Date(isoString).getTime();
+  if (!Number.isFinite(time)) return '';
 
-  // Try exact URL match first
-  let matches = allTabs.filter(t => t.url === url);
-
-  // Fall back to hostname match
-  if (matches.length === 0) {
-    try {
-      const targetHost = new URL(url).hostname;
-      matches = allTabs.filter(t => {
-        try { return new URL(t.url).hostname === targetHost; }
-        catch { return false; }
-      });
-    } catch {}
-  }
-
-  if (matches.length === 0) return;
-
-  // Prefer a match in a different window so it actually switches windows
-  const match = matches.find(t => t.windowId !== currentWindow.id) || matches[0];
-  await browser.tabs.update(match.id, { active: true });
-  await browser.windows.update(match.windowId, { focused: true });
+  const seconds = Math.max(1, Math.floor((Date.now() - time) / 1000));
+  if (seconds < 60) return 'now';
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h`;
+  const days = Math.floor(hours / 24);
+  if (days < 30) return `${days}d`;
+  const months = Math.floor(days / 30);
+  return `${months}mo`;
 }
 
-/**
- * closeDuplicateTabs(urls, keepOne)
- *
- * Closes duplicate tabs for the given list of URLs.
- * keepOne=true → keep one copy of each, close the rest.
- * keepOne=false → close all copies.
- */
-async function closeDuplicateTabs(urls, keepOne = true) {
-  const allTabs = await browser.tabs.query({});
-  const toClose = [];
-
-  for (const url of urls) {
-    const matching = allTabs.filter(t => t.url === url);
-    if (keepOne) {
-      const keep = matching.find(t => t.active) || matching[0];
-      for (const tab of matching) {
-        if (tab.id !== keep.id) toClose.push(tab.id);
-      }
-    } else {
-      for (const tab of matching) toClose.push(tab.id);
-    }
-  }
-
-  if (toClose.length > 0) await browser.tabs.remove(toClose);
-  await fetchOpenTabs();
+function simplifyTitle(title, url) {
+  const raw = String(title || url || 'Untitled');
+  return raw
+    .replace(/\s[-|\u00b7]\s.*$/, '')
+    .replace(/\(\d+\)\s*$/, '')
+    .trim() || raw;
 }
 
-/**
- * closeTabOutDupes()
- *
- * Closes all duplicate Tab Out new-tab pages except the current one.
- */
-async function closeTabOutDupes() {
-  const allTabs = await browser.tabs.query({});
-  const currentWindow = await browser.windows.getCurrent();
-  const tabOutTabs = allTabs.filter(t => isTabOutUrl(t.url));
-
-  if (tabOutTabs.length <= 1) return;
-
-  // Keep the active Tab Out tab in the CURRENT window — that's the one the
-  // user is looking at right now. Falls back to any active one, then the first.
-  const keep =
-    tabOutTabs.find(t => t.active && t.windowId === currentWindow.id) ||
-    tabOutTabs.find(t => t.active) ||
-    tabOutTabs[0];
-  const toClose = tabOutTabs.filter(t => t.id !== keep.id).map(t => t.id);
-  if (toClose.length > 0) await browser.tabs.remove(toClose);
-  await fetchOpenTabs();
+function tabDisplayTitle(tab) {
+  const base = simplifyTitle(tab.title, tab.url);
+  try {
+    const parsed = new URL(tab.url);
+    if (parsed.hostname === 'localhost' && parsed.port) return `${parsed.port} ${base}`;
+  } catch {}
+  return base;
 }
 
-
-/* ----------------------------------------------------------------
-   SAVED FOR LATER - browser.storage.local
-
-   Replaces the old server-side SQLite + REST API with Firefox's
-   built-in key-value storage. Data persists across browser sessions
-   and doesn't require a running server.
-
-   Data shape stored under the "deferred" key:
-   [
-     {
-       id: "1712345678901",          // timestamp-based unique ID
-       url: "https://example.com",
-       title: "Example Page",
-       savedAt: "2026-04-04T10:00:00.000Z",  // ISO date string
-       completed: false,             // true = checked off (archived)
-       dismissed: false              // true = dismissed without reading
-     },
-     ...
-   ]
-   ---------------------------------------------------------------- */
-
-/**
- * saveTabForLater(tab)
- *
- * Saves a single tab to the "Saved for Later" list in browser.storage.local.
- * @param {{ url: string, title: string }} tab
- */
-async function saveTabForLater(tab) {
-  const { deferred = [] } = await browser.storage.local.get('deferred');
-  deferred.push({
-    id:        Date.now().toString(),
-    url:       tab.url,
-    title:     tab.title,
-    savedAt:   new Date().toISOString(),
-    completed: false,
-    dismissed: false,
-  });
-  await browser.storage.local.set({ deferred });
+function getTabById(tabId) {
+  return state.allTabs.find(tab => tab.id === tabId);
 }
 
-/**
- * getSavedTabs()
- *
- * Returns all saved tabs from browser.storage.local.
- * Filters out dismissed items (those are gone for good).
- * Splits into active (not completed) and archived (completed).
- */
-async function getSavedTabs() {
-  const { deferred = [] } = await browser.storage.local.get('deferred');
-  const visible = deferred.filter(t => !t.dismissed);
+function isTabOutUrl(url) {
+  return url === dashboardUrl();
+}
+
+function normalizeBrowserTab(tab) {
   return {
-    active:   visible.filter(t => !t.completed),
-    archived: visible.filter(t => t.completed),
+    id: tab.id,
+    url: tab.url || tab.pendingUrl || '',
+    title: tab.title || tab.url || 'Untitled',
+    windowId: tab.windowId,
+    active: !!tab.active,
+    index: typeof tab.index === 'number' ? tab.index : 0,
+    pinned: !!tab.pinned,
+    discarded: !!tab.discarded,
+    audible: !!tab.audible,
+    groupId: typeof tab.groupId === 'number' ? tab.groupId : TAB_GROUP_NONE,
+    favIconUrl: tab.favIconUrl || '',
+    isTabOut: isTabOutUrl(tab.url),
   };
 }
 
-/**
- * checkOffSavedTab(id)
- *
- * Marks a saved tab as completed (checked off). It moves to the archive.
- */
-async function checkOffSavedTab(id) {
-  const { deferred = [] } = await browser.storage.local.get('deferred');
-  const tab = deferred.find(t => t.id === id);
-  if (tab) {
-    tab.completed = true;
-    tab.completedAt = new Date().toISOString();
-    await browser.storage.local.set({ deferred });
-  }
-}
-
-/**
- * dismissSavedTab(id)
- *
- * Marks a saved tab as dismissed (removed from all lists).
- */
-async function dismissSavedTab(id) {
-  const { deferred = [] } = await browser.storage.local.get('deferred');
-  const tab = deferred.find(t => t.id === id);
-  if (tab) {
-    tab.dismissed = true;
-    await browser.storage.local.set({ deferred });
-  }
-}
-
-
-/* ----------------------------------------------------------------
-   UI HELPERS
-   ---------------------------------------------------------------- */
-
-/**
- * playCloseSound()
- *
- * Plays a clean "swoosh" sound when tabs are closed.
- * Built entirely with the Web Audio API — no sound files needed.
- * A filtered noise sweep that descends in pitch, like air moving.
- */
-function playCloseSound() {
-  try {
-    const ctx = new (window.AudioContext || window.webkitAudioContext)();
-    const t = ctx.currentTime;
-
-    // Swoosh: shaped white noise through a sweeping bandpass filter
-    const duration = 0.25;
-    const buffer = ctx.createBuffer(1, ctx.sampleRate * duration, ctx.sampleRate);
-    const data = buffer.getChannelData(0);
-
-    // Generate noise with a natural envelope (quick attack, smooth decay)
-    for (let i = 0; i < data.length; i++) {
-      const pos = i / data.length;
-      // Envelope: ramps up fast in first 10%, then fades out smoothly
-      const env = pos < 0.1 ? pos / 0.1 : Math.pow(1 - (pos - 0.1) / 0.9, 1.5);
-      data[i] = (Math.random() * 2 - 1) * env;
-    }
-
-    const source = ctx.createBufferSource();
-    source.buffer = buffer;
-
-    // Bandpass filter sweeps from high to low — creates the "swoosh" character
-    const filter = ctx.createBiquadFilter();
-    filter.type = 'bandpass';
-    filter.Q.value = 2.0;
-    filter.frequency.setValueAtTime(4000, t);
-    filter.frequency.exponentialRampToValueAtTime(400, t + duration);
-
-    // Volume
-    const gain = ctx.createGain();
-    gain.gain.setValueAtTime(0.15, t);
-    gain.gain.exponentialRampToValueAtTime(0.001, t + duration);
-
-    source.connect(filter).connect(gain).connect(ctx.destination);
-    source.start(t);
-
-    setTimeout(() => ctx.close(), 500);
-  } catch {
-    // Audio not supported — fail silently
-  }
-}
-
-/**
- * shootConfetti(x, y)
- *
- * Shoots a burst of colorful confetti particles from the given screen
- * coordinates (typically the center of a card being closed).
- * Pure CSS + JS, no libraries.
- */
-function shootConfetti(x, y) {
-  const colors = [
-    '#c8713a', // amber
-    '#e8a070', // amber light
-    '#5a7a62', // sage
-    '#8aaa92', // sage light
-    '#5a6b7a', // slate
-    '#8a9baa', // slate light
-    '#d4b896', // warm paper
-    '#b35a5a', // rose
-  ];
-
-  const particleCount = 17;
-
-  for (let i = 0; i < particleCount; i++) {
-    const el = document.createElement('div');
-
-    const isCircle = Math.random() > 0.5;
-    const size = 5 + Math.random() * 6; // 5–11px
-    const color = colors[Math.floor(Math.random() * colors.length)];
-
-    el.style.cssText = `
-      position: fixed;
-      left: ${x}px;
-      top: ${y}px;
-      width: ${size}px;
-      height: ${size}px;
-      background: ${color};
-      border-radius: ${isCircle ? '50%' : '2px'};
-      pointer-events: none;
-      z-index: 9999;
-      transform: translate(-50%, -50%);
-      opacity: 1;
-    `;
-    document.body.appendChild(el);
-
-    // Physics: random angle and speed for the outward burst
-    const angle   = Math.random() * Math.PI * 2;
-    const speed   = 60 + Math.random() * 120;
-    const vx      = Math.cos(angle) * speed;
-    const vy      = Math.sin(angle) * speed - 80; // bias upward
-    const gravity = 200;
-
-    const startTime = performance.now();
-    const duration  = 700 + Math.random() * 200; // 700–900ms
-
-    function frame(now) {
-      const elapsed  = (now - startTime) / 1000;
-      const progress = elapsed / (duration / 1000);
-
-      if (progress >= 1) { el.remove(); return; }
-
-      const px = vx * elapsed;
-      const py = vy * elapsed + 0.5 * gravity * elapsed * elapsed;
-      const opacity = progress < 0.5 ? 1 : 1 - (progress - 0.5) * 2;
-      const rotate  = elapsed * 200 * (isCircle ? 0 : 1);
-
-      el.style.transform = `translate(calc(-50% + ${px}px), calc(-50% + ${py}px)) rotate(${rotate}deg)`;
-      el.style.opacity = opacity;
-
-      requestAnimationFrame(frame);
-    }
-
-    requestAnimationFrame(frame);
-  }
-}
-
-/**
- * animateCardOut(card)
- *
- * Smoothly removes a mission card: fade + scale down, then confetti.
- * After the animation, checks if the grid is now empty.
- */
-function animateCardOut(card) {
-  if (!card) return;
-
-  const rect = card.getBoundingClientRect();
-  shootConfetti(rect.left + rect.width / 2, rect.top + rect.height / 2);
-
-  card.classList.add('closing');
-  setTimeout(() => {
-    card.remove();
-    checkAndShowEmptyState();
-  }, 300);
-}
-
-/**
- * showToast(message)
- *
- * Brief pop-up notification at the bottom of the screen.
- */
-function showToast(message) {
-  const toast = document.getElementById('toast');
-  document.getElementById('toastText').textContent = message;
-  toast.classList.add('visible');
-  setTimeout(() => toast.classList.remove('visible'), 2500);
-}
-
-/**
- * checkAndShowEmptyState()
- *
- * Shows a cheerful "Inbox zero" message when all domain cards are gone.
- */
-function checkAndShowEmptyState() {
-  const missionsEl = document.getElementById('openTabsMissions');
-  if (!missionsEl) return;
-
-  const remaining = missionsEl.querySelectorAll('.mission-card:not(.closing)').length;
-  if (remaining > 0) return;
-
-  missionsEl.innerHTML = `
-    <div class="missions-empty-state">
-      <div class="empty-checkmark">
-        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
-          <path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5" />
-        </svg>
-      </div>
-      <div class="empty-title">Inbox zero, but for tabs.</div>
-      <div class="empty-subtitle">You're free.</div>
-    </div>
-  `;
-
-  const countEl = document.getElementById('openTabsSectionCount');
-  if (countEl) countEl.textContent = '0 domains';
-}
-
-/**
- * timeAgo(dateStr)
- *
- * Converts an ISO date string into a human-friendly relative time.
- * "2026-04-04T10:00:00Z" → "2 hrs ago" or "yesterday"
- */
-function timeAgo(dateStr) {
-  if (!dateStr) return '';
-  const then = new Date(dateStr);
-  const now  = new Date();
-  const diffMins  = Math.floor((now - then) / 60000);
-  const diffHours = Math.floor((now - then) / 3600000);
-  const diffDays  = Math.floor((now - then) / 86400000);
-
-  if (diffMins < 1)   return 'just now';
-  if (diffMins < 60)  return diffMins + ' min ago';
-  if (diffHours < 24) return diffHours + ' hr' + (diffHours !== 1 ? 's' : '') + ' ago';
-  if (diffDays === 1) return 'yesterday';
-  return diffDays + ' days ago';
-}
-
-/**
- * getGreeting() — "Good morning / afternoon / evening"
- */
-function getGreeting() {
-  const hour = new Date().getHours();
-  if (hour < 12) return 'Good morning';
-  if (hour < 17) return 'Good afternoon';
-  return 'Good evening';
-}
-
-/**
- * getDateDisplay() — "Friday, April 4, 2026"
- */
-function getDateDisplay() {
-  return new Date().toLocaleDateString('en-US', {
-    weekday: 'long',
-    year:    'numeric',
-    month:   'long',
-    day:     'numeric',
-  });
-}
-
-
-/* ----------------------------------------------------------------
-   DOMAIN & TITLE CLEANUP HELPERS
-   ---------------------------------------------------------------- */
-
-// Map of known hostnames → friendly display names.
-const FRIENDLY_DOMAINS = {
-  'github.com':           'GitHub',
-  'www.github.com':       'GitHub',
-  'gist.github.com':      'GitHub Gist',
-  'youtube.com':          'YouTube',
-  'www.youtube.com':      'YouTube',
-  'music.youtube.com':    'YouTube Music',
-  'x.com':                'X',
-  'www.x.com':            'X',
-  'twitter.com':          'X',
-  'www.twitter.com':      'X',
-  'reddit.com':           'Reddit',
-  'www.reddit.com':       'Reddit',
-  'old.reddit.com':       'Reddit',
-  'substack.com':         'Substack',
-  'www.substack.com':     'Substack',
-  'medium.com':           'Medium',
-  'www.medium.com':       'Medium',
-  'linkedin.com':         'LinkedIn',
-  'www.linkedin.com':     'LinkedIn',
-  'stackoverflow.com':    'Stack Overflow',
-  'www.stackoverflow.com':'Stack Overflow',
-  'news.ycombinator.com': 'Hacker News',
-  'google.com':           'Google',
-  'www.google.com':       'Google',
-  'mail.google.com':      'Gmail',
-  'docs.google.com':      'Google Docs',
-  'drive.google.com':     'Google Drive',
-  'calendar.google.com':  'Google Calendar',
-  'meet.google.com':      'Google Meet',
-  'gemini.google.com':    'Gemini',
-  'chatgpt.com':          'ChatGPT',
-  'www.chatgpt.com':      'ChatGPT',
-  'chat.openai.com':      'ChatGPT',
-  'claude.ai':            'Claude',
-  'www.claude.ai':        'Claude',
-  'code.claude.com':      'Claude Code',
-  'notion.so':            'Notion',
-  'www.notion.so':        'Notion',
-  'figma.com':            'Figma',
-  'www.figma.com':        'Figma',
-  'slack.com':            'Slack',
-  'app.slack.com':        'Slack',
-  'discord.com':          'Discord',
-  'www.discord.com':      'Discord',
-  'wikipedia.org':        'Wikipedia',
-  'en.wikipedia.org':     'Wikipedia',
-  'amazon.com':           'Amazon',
-  'www.amazon.com':       'Amazon',
-  'netflix.com':          'Netflix',
-  'www.netflix.com':      'Netflix',
-  'spotify.com':          'Spotify',
-  'open.spotify.com':     'Spotify',
-  'vercel.com':           'Vercel',
-  'www.vercel.com':       'Vercel',
-  'npmjs.com':            'npm',
-  'www.npmjs.com':        'npm',
-  'developer.mozilla.org':'MDN',
-  'arxiv.org':            'arXiv',
-  'www.arxiv.org':        'arXiv',
-  'huggingface.co':       'Hugging Face',
-  'www.huggingface.co':   'Hugging Face',
-  'producthunt.com':      'Product Hunt',
-  'www.producthunt.com':  'Product Hunt',
-  'xiaohongshu.com':      'RedNote',
-  'www.xiaohongshu.com':  'RedNote',
-  'local-files':          'Local Files',
-};
-
-function friendlyDomain(hostname) {
-  if (!hostname) return '';
-  if (FRIENDLY_DOMAINS[hostname]) return FRIENDLY_DOMAINS[hostname];
-
-  if (hostname.endsWith('.substack.com') && hostname !== 'substack.com') {
-    return capitalize(hostname.replace('.substack.com', '')) + "'s Substack";
-  }
-  if (hostname.endsWith('.github.io')) {
-    return capitalize(hostname.replace('.github.io', '')) + ' (GitHub Pages)';
+async function loadUiState() {
+  const data = await browser.storage.local.get(UI_STATE_KEY);
+  if (data[UI_STATE_KEY] && typeof data[UI_STATE_KEY] === 'object') {
+    state.ui = { ...state.ui, ...data[UI_STATE_KEY] };
   }
 
-  let clean = hostname
-    .replace(/^www\./, '')
-    .replace(/\.(com|org|net|io|co|ai|dev|app|so|me|xyz|info|us|uk|co\.uk|co\.jp)$/, '');
-
-  return clean.split('.').map(part => capitalize(part)).join(' ');
+  const search = $('globalSearch');
+  if (search) search.value = state.ui.query || '';
+  const bookmarkSearch = $('bookmarkSearch');
+  if (bookmarkSearch) bookmarkSearch.value = state.ui.bookmarkQuery || '';
+  const archiveSearch = $('archiveSearch');
+  if (archiveSearch) archiveSearch.value = state.ui.archiveQuery || '';
 }
 
-function capitalize(str) {
-  if (!str) return '';
-  return str.charAt(0).toUpperCase() + str.slice(1);
+async function persistUiState() {
+  await browser.storage.local.set({ [UI_STATE_KEY]: state.ui });
 }
 
-function stripTitleNoise(title) {
-  if (!title) return '';
-  // Strip leading notification count: "(2) Title"
-  title = title.replace(/^\(\d+\+?\)\s*/, '');
-  // Strip inline counts like "Inbox (16,359)"
-  title = title.replace(/\s*\([\d,]+\+?\)\s*/g, ' ');
-  // Strip email addresses (privacy + cleaner display)
-  title = title.replace(/\s*[\-\u2010-\u2015]\s*[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/g, '');
-  title = title.replace(/[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/g, '');
-  // Clean X/Twitter format
-  title = title.replace(/\s+on X:\s*/, ': ');
-  title = title.replace(/\s*\/\s*X\s*$/, '');
-  return title.trim();
+async function fetchOpenTabs() {
+  const tabs = await browser.tabs.query({});
+  state.allTabs = tabs.map(normalizeBrowserTab);
+  state.realTabs = state.allTabs.filter(tab => isUserFacingTabUrl(tab.url));
 }
 
-function cleanTitle(title, hostname) {
-  if (!title || !hostname) return title || '';
-
-  const friendly = friendlyDomain(hostname);
-  const domain   = hostname.replace(/^www\./, '');
-  const seps     = [' - ', ' | ', ' — ', ' · ', ' – '];
-
-  for (const sep of seps) {
-    const idx = title.lastIndexOf(sep);
-    if (idx === -1) continue;
-    const suffix     = title.slice(idx + sep.length).trim();
-    const suffixLow  = suffix.toLowerCase();
-    if (
-      suffixLow === domain.toLowerCase() ||
-      suffixLow === friendly.toLowerCase() ||
-      suffixLow === domain.replace(/\.\w+$/, '').toLowerCase() ||
-      domain.toLowerCase().includes(suffixLow) ||
-      friendly.toLowerCase().includes(suffixLow)
-    ) {
-      const cleaned = title.slice(0, idx).trim();
-      if (cleaned.length >= 5) return cleaned;
-    }
+async function fetchFirefoxGroups() {
+  if (!browser.tabGroups || !browser.tabGroups.query) {
+    state.firefoxGroups = [];
+    return;
   }
-  return title;
-}
-
-function smartTitle(title, url) {
-  if (!url) return title || '';
-  let pathname = '', hostname = '';
-  try { const u = new URL(url); pathname = u.pathname; hostname = u.hostname; }
-  catch { return title || ''; }
-
-  const titleIsUrl = !title || title === url || title.startsWith(hostname) || title.startsWith('http');
-
-  if ((hostname === 'x.com' || hostname === 'twitter.com' || hostname === 'www.x.com') && pathname.includes('/status/')) {
-    const username = pathname.split('/')[1];
-    if (username) return titleIsUrl ? `Post by @${username}` : title;
-  }
-
-  if (hostname === 'github.com' || hostname === 'www.github.com') {
-    const parts = pathname.split('/').filter(Boolean);
-    if (parts.length >= 2) {
-      const [owner, repo, ...rest] = parts;
-      if (rest[0] === 'issues' && rest[1]) return `${owner}/${repo} Issue #${rest[1]}`;
-      if (rest[0] === 'pull'   && rest[1]) return `${owner}/${repo} PR #${rest[1]}`;
-      if (rest[0] === 'blob' || rest[0] === 'tree') return `${owner}/${repo} — ${rest.slice(2).join('/')}`;
-      if (titleIsUrl) return `${owner}/${repo}`;
-    }
-  }
-
-  if ((hostname === 'www.youtube.com' || hostname === 'youtube.com') && pathname === '/watch') {
-    if (titleIsUrl) return 'YouTube Video';
-  }
-
-  if ((hostname === 'www.reddit.com' || hostname === 'reddit.com' || hostname === 'old.reddit.com') && pathname.includes('/comments/')) {
-    const parts  = pathname.split('/').filter(Boolean);
-    const subIdx = parts.indexOf('r');
-    if (subIdx !== -1 && parts[subIdx + 1]) {
-      if (titleIsUrl) return `r/${parts[subIdx + 1]} post`;
-    }
-  }
-
-  return title || url;
-}
-
-
-/* ----------------------------------------------------------------
-   SVG ICON STRINGS
-   ---------------------------------------------------------------- */
-const ICONS = {
-  tabs:    `<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M3 8.25V18a2.25 2.25 0 0 0 2.25 2.25h13.5A2.25 2.25 0 0 0 21 18V8.25m-18 0V6a2.25 2.25 0 0 1 2.25-2.25h13.5A2.25 2.25 0 0 1 21 6v2.25m-18 0h18" /></svg>`,
-  close:   `<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18 18 6M6 6l12 12" /></svg>`,
-  archive: `<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M20.25 7.5l-.625 10.632a2.25 2.25 0 0 1-2.247 2.118H6.622a2.25 2.25 0 0 1-2.247-2.118L3.75 7.5m6 4.125l2.25 2.25m0 0l2.25 2.25M12 13.875l2.25-2.25M12 13.875l-2.25 2.25M3.375 7.5h17.25c.621 0 1.125-.504 1.125-1.125v-1.5c0-.621-.504-1.125-1.125-1.125H3.375c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125Z" /></svg>`,
-  focus:   `<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="m4.5 19.5 15-15m0 0H8.25m11.25 0v11.25" /></svg>`,
-};
-
-
-/* ----------------------------------------------------------------
-   IN-MEMORY STORE FOR OPEN-TAB GROUPS
-   ---------------------------------------------------------------- */
-let domainGroups = [];
-
-
-/* ----------------------------------------------------------------
-   HELPER: filter out browser-internal pages
-   ---------------------------------------------------------------- */
-
-/**
- * getRealTabs()
- *
- * Returns tabs that are user-facing pages.
- */
-function getRealTabs() {
-  return openTabs.filter(t => isUserFacingTabUrl(t.url));
-}
-
-/**
- * checkTabOutDupes()
- *
- * Counts how many Tab Out pages are open. If more than 1,
- * shows a banner offering to close the extras.
- */
-function checkTabOutDupes() {
-  const tabOutTabs = openTabs.filter(t => t.isTabOut);
-  const banner  = document.getElementById('tabOutDupeBanner');
-  const countEl = document.getElementById('tabOutDupeCount');
-  if (!banner) return;
-
-  if (tabOutTabs.length > 1) {
-    if (countEl) countEl.textContent = tabOutTabs.length;
-    banner.style.display = 'flex';
-  } else {
-    banner.style.display = 'none';
-  }
-}
-
-
-/* ----------------------------------------------------------------
-   OVERFLOW CHIPS ("+N more" expand button in domain cards)
-   ---------------------------------------------------------------- */
-
-function buildOverflowChips(hiddenTabs, urlCounts = {}) {
-  const hiddenChips = hiddenTabs.map(tab => {
-    const label    = cleanTitle(smartTitle(stripTitleNoise(tab.title || ''), tab.url), '');
-    const count    = urlCounts[tab.url] || 1;
-    const dupeTag  = count > 1 ? ` <span class="chip-dupe-badge">(${count}x)</span>` : '';
-    const chipClass = count > 1 ? ' chip-has-dupes' : '';
-    const safeUrl   = escapeHtml(tab.url || '');
-    const safeTitle = escapeHtml(label);
-    const safeLabel = escapeHtml(label);
-    return `<div class="page-chip clickable${chipClass}" data-action="focus-tab" data-tab-url="${safeUrl}" title="${safeTitle}">
-      <span class="chip-text">${safeLabel}</span>${dupeTag}
-      <div class="chip-actions">
-        <button class="chip-action chip-save" data-action="defer-single-tab" data-tab-url="${safeUrl}" data-tab-title="${safeTitle}" title="Save for later">
-          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M17.593 3.322c1.1.128 1.907 1.077 1.907 2.185V21L12 17.25 4.5 21V5.507c0-1.108.806-2.057 1.907-2.185a48.507 48.507 0 0 1 11.186 0Z" /></svg>
-        </button>
-        <button class="chip-action chip-close" data-action="close-single-tab" data-tab-url="${safeUrl}" title="Close this tab">
-          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18 18 6M6 6l12 12" /></svg>
-        </button>
-      </div>
-    </div>`;
-  }).join('');
-
-  return `
-    <div class="page-chips-overflow" style="display:none">${hiddenChips}</div>
-    <div class="page-chip page-chip-overflow clickable" data-action="expand-chips">
-      <span class="chip-text">+${hiddenTabs.length} more</span>
-    </div>`;
-}
-
-
-/* ----------------------------------------------------------------
-   DOMAIN CARD RENDERER
-   ---------------------------------------------------------------- */
-
-/**
- * renderDomainCard(group, groupIndex)
- *
- * Builds the HTML for one domain group card.
- * group = { domain: string, tabs: [{ url, title, id, windowId, active }] }
- */
-function renderDomainCard(group) {
-  const tabs      = group.tabs || [];
-  const tabCount  = tabs.length;
-  const isLanding = group.domain === '__landing-pages__';
-  const stableId  = 'domain-' + group.domain.replace(/[^a-z0-9]/g, '-');
-
-  // Count duplicates (exact URL match)
-  const urlCounts = {};
-  for (const tab of tabs) urlCounts[tab.url] = (urlCounts[tab.url] || 0) + 1;
-  const dupeUrls   = Object.entries(urlCounts).filter(([, c]) => c > 1);
-  const hasDupes   = dupeUrls.length > 0;
-  const totalExtras = dupeUrls.reduce((s, [, c]) => s + c - 1, 0);
-
-  const tabBadge = `<span class="open-tabs-badge">
-    ${ICONS.tabs}
-    ${tabCount} tab${tabCount !== 1 ? 's' : ''} open
-  </span>`;
-
-  const dupeBadge = hasDupes
-    ? `<span class="open-tabs-badge" style="color:var(--accent-amber);background:rgba(200,113,58,0.08);">
-        ${totalExtras} duplicate${totalExtras !== 1 ? 's' : ''}
-      </span>`
-    : '';
-
-  // Deduplicate for display: show each URL once, with (Nx) badge if duped
-  const seen = new Set();
-  const uniqueTabs = [];
-  for (const tab of tabs) {
-    if (!seen.has(tab.url)) { seen.add(tab.url); uniqueTabs.push(tab); }
-  }
-
-  const visibleTabs = uniqueTabs.slice(0, 8);
-  const extraCount  = uniqueTabs.length - visibleTabs.length;
-
-  const pageChips = visibleTabs.map(tab => {
-    let label = cleanTitle(smartTitle(stripTitleNoise(tab.title || ''), tab.url), group.domain);
-    // For localhost tabs, prepend port number so you can tell projects apart
-    try {
-      const parsed = new URL(tab.url);
-      if (parsed.hostname === 'localhost' && parsed.port) label = `${parsed.port} ${label}`;
-    } catch {}
-    const count    = urlCounts[tab.url];
-    const dupeTag  = count > 1 ? ` <span class="chip-dupe-badge">(${count}x)</span>` : '';
-    const chipClass = count > 1 ? ' chip-has-dupes' : '';
-    const safeUrl   = escapeHtml(tab.url || '');
-    const safeTitle = escapeHtml(label);
-    const safeLabel = escapeHtml(label);
-    return `<div class="page-chip clickable${chipClass}" data-action="focus-tab" data-tab-url="${safeUrl}" title="${safeTitle}">
-      <span class="chip-text">${safeLabel}</span>${dupeTag}
-      <div class="chip-actions">
-        <button class="chip-action chip-save" data-action="defer-single-tab" data-tab-url="${safeUrl}" data-tab-title="${safeTitle}" title="Save for later">
-          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M17.593 3.322c1.1.128 1.907 1.077 1.907 2.185V21L12 17.25 4.5 21V5.507c0-1.108.806-2.057 1.907-2.185a48.507 48.507 0 0 1 11.186 0Z" /></svg>
-        </button>
-        <button class="chip-action chip-close" data-action="close-single-tab" data-tab-url="${safeUrl}" title="Close this tab">
-          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18 18 6M6 6l12 12" /></svg>
-        </button>
-      </div>
-    </div>`;
-  }).join('') + (extraCount > 0 ? buildOverflowChips(uniqueTabs.slice(8), urlCounts) : '');
-
-  let actionsHtml = `
-    <button class="action-btn close-tabs" data-action="close-domain-tabs" data-domain-id="${stableId}">
-      ${ICONS.close}
-      Close all ${tabCount} tab${tabCount !== 1 ? 's' : ''}
-    </button>`;
-
-  if (hasDupes) {
-    const dupeUrlsEncoded = dupeUrls.map(([url]) => encodeURIComponent(url)).join(',');
-    actionsHtml += `
-      <button class="action-btn" data-action="dedup-keep-one" data-dupe-urls="${dupeUrlsEncoded}">
-        Close ${totalExtras} duplicate${totalExtras !== 1 ? 's' : ''}
-      </button>`;
-  }
-
-  return `
-    <div class="mission-card domain-card ${hasDupes ? 'has-amber-bar' : 'has-neutral-bar'}" data-domain-id="${stableId}">
-      <div class="status-bar"></div>
-      <div class="mission-content">
-        <div class="mission-top">
-          <span class="mission-name">${escapeHtml(isLanding ? 'Homepages' : (group.label || friendlyDomain(group.domain)))}</span>
-          ${tabBadge}
-          ${dupeBadge}
-        </div>
-        <div class="mission-pages">${pageChips}</div>
-        <div class="actions">${actionsHtml}</div>
-      </div>
-      <div class="mission-meta">
-        <div class="mission-page-count">${tabCount}</div>
-        <div class="mission-page-label">tabs</div>
-      </div>
-    </div>`;
-}
-
-
-/* ----------------------------------------------------------------
-   SAVED FOR LATER — Render Checklist Column
-   ---------------------------------------------------------------- */
-
-/**
- * renderDeferredColumn()
- *
- * Reads saved tabs from browser.storage.local and renders the right-side
- * "Saved for Later" checklist column. Shows active items as a checklist
- * and completed items in a collapsible archive.
- */
-async function renderDeferredColumn() {
-  const column         = document.getElementById('deferredColumn');
-  const list           = document.getElementById('deferredList');
-  const empty          = document.getElementById('deferredEmpty');
-  const countEl        = document.getElementById('deferredCount');
-  const archiveEl      = document.getElementById('deferredArchive');
-  const archiveCountEl = document.getElementById('archiveCount');
-  const archiveList    = document.getElementById('archiveList');
-
-  if (!column) return;
 
   try {
-    const { active, archived } = await getSavedTabs();
-
-    // Hide the entire column if there's nothing to show
-    if (active.length === 0 && archived.length === 0) {
-      column.style.display = 'none';
-      return;
-    }
-
-    column.style.display = 'block';
-
-    // Render active checklist items
-    if (active.length > 0) {
-      countEl.textContent = `${active.length} item${active.length !== 1 ? 's' : ''}`;
-      list.innerHTML = active.map(item => renderDeferredItem(item)).join('');
-      list.style.display = 'block';
-      empty.style.display = 'none';
-    } else {
-      list.style.display = 'none';
-      countEl.textContent = '';
-      empty.style.display = 'block';
-    }
-
-    // Render archive section
-    if (archived.length > 0) {
-      archiveCountEl.textContent = `(${archived.length})`;
-      archiveList.innerHTML = archived.map(item => renderArchiveItem(item)).join('');
-      archiveEl.style.display = 'block';
-    } else {
-      archiveEl.style.display = 'none';
-    }
-
-  } catch (err) {
-    console.warn('[tab-out] Could not load saved tabs:', err);
-    column.style.display = 'none';
+    state.firefoxGroups = await browser.tabGroups.query({});
+  } catch (error) {
+    devLog('tabGroups.query.failed', { message: error.message });
+    state.firefoxGroups = [];
   }
 }
 
-/**
- * renderDeferredItem(item)
- *
- * Builds HTML for one active checklist item: checkbox, title link,
- * domain, time ago, dismiss button.
- */
-function renderDeferredItem(item) {
-  let domain = '';
-  try { domain = new URL(item.url).hostname.replace(/^www\./, ''); } catch {}
-  const ago = timeAgo(item.savedAt);
-  const safeId = escapeHtml(item.id);
-  const safeTitle = escapeHtml(item.title || item.url);
-  const safeUrl = safeHref(item.url);
-
-  return `
-    <div class="deferred-item" data-deferred-id="${safeId}">
-      <input type="checkbox" class="deferred-checkbox" data-action="check-deferred" data-deferred-id="${safeId}">
-      <div class="deferred-info">
-        <a href="${safeUrl}" target="_blank" rel="noopener" class="deferred-title" title="${safeTitle}">
-          ${safeTitle}
-        </a>
-        <div class="deferred-meta">
-          <span>${escapeHtml(domain)}</span>
-          <span>${ago}</span>
-        </div>
-      </div>
-      <button class="deferred-dismiss" data-action="dismiss-deferred" data-deferred-id="${safeId}" title="Dismiss">
-        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18 18 6M6 6l12 12" /></svg>
-      </button>
-    </div>`;
+function flattenBookmarks(nodes, out = []) {
+  for (const node of nodes || []) {
+    out.push(node);
+    if (node.children) flattenBookmarks(node.children, out);
+  }
+  return out;
 }
 
-/**
- * renderArchiveItem(item)
- *
- * Builds HTML for one completed/archived item (simpler: just title + date).
- */
-function renderArchiveItem(item) {
-  const ago = item.completedAt ? timeAgo(item.completedAt) : timeAgo(item.savedAt);
-  const safeTitle = escapeHtml(item.title || item.url);
-  const safeUrl = safeHref(item.url);
-  return `
-    <div class="archive-item">
-      <a href="${safeUrl}" target="_blank" rel="noopener" class="archive-item-title" title="${safeTitle}">
-        ${safeTitle}
-      </a>
-      <span class="archive-item-date">${ago}</span>
-    </div>`;
+async function findWritableBookmarkParent() {
+  const tree = await browser.bookmarks.getTree();
+  const rootChildren = (tree[0] && tree[0].children) || [];
+  return rootChildren.find(node => node.type === 'folder' && !node.unmodifiable) ||
+    rootChildren.find(node => node.type === 'folder') ||
+    null;
 }
 
-
-/* ----------------------------------------------------------------
-   MAIN DASHBOARD RENDERER
-   ---------------------------------------------------------------- */
-
-/**
- * renderStaticDashboard()
- *
- * The main render function:
- * 1. Paints greeting + date
- * 2. Fetches open tabs via browser.tabs.query()
- * 3. Groups tabs by domain (with landing pages pulled out to their own group)
- * 4. Renders domain cards
- * 5. Updates footer stats
- * 6. Renders the "Saved for Later" checklist
- */
-async function renderStaticDashboard() {
-  // --- Header ---
-  const greetingEl = document.getElementById('greeting');
-  const dateEl     = document.getElementById('dateDisplay');
-  if (greetingEl) greetingEl.textContent = getGreeting();
-  if (dateEl)     dateEl.textContent     = getDateDisplay();
-
-  // --- Fetch tabs ---
-  await fetchOpenTabs();
-  const realTabs = getRealTabs();
-
-  // --- Group tabs by domain ---
-  // Landing pages (Gmail inbox, Twitter home, etc.) get their own special group
-  // so they can be closed together without affecting content tabs on the same domain.
-  const LANDING_PAGE_PATTERNS = [
-    { hostname: 'mail.google.com', test: (p, h) =>
-        !h.includes('#inbox/') && !h.includes('#sent/') && !h.includes('#search/') },
-    { hostname: 'x.com',               pathExact: ['/home'] },
-    { hostname: 'www.linkedin.com',    pathExact: ['/'] },
-    { hostname: 'github.com',          pathExact: ['/'] },
-    { hostname: 'www.youtube.com',     pathExact: ['/'] },
-    // Merge personal patterns from config.local.js (if it exists)
-    ...(typeof LOCAL_LANDING_PAGE_PATTERNS !== 'undefined' ? LOCAL_LANDING_PAGE_PATTERNS : []),
-  ];
-
-  function isLandingPage(url) {
+async function ensureBookmarkFolder() {
+  const stored = await browser.storage.local.get(BOOKMARK_FOLDER_KEY);
+  if (stored[BOOKMARK_FOLDER_KEY]) {
     try {
-      const parsed = new URL(url);
-      return LANDING_PAGE_PATTERNS.some(p => {
-        // Support both exact hostname and suffix matching (for wildcard subdomains)
-        const hostnameMatch = p.hostname
-          ? parsed.hostname === p.hostname
-          : p.hostnameEndsWith
-            ? parsed.hostname.endsWith(p.hostnameEndsWith)
-            : false;
-        if (!hostnameMatch) return false;
-        if (p.test)       return p.test(parsed.pathname, url);
-        if (p.pathPrefix) return parsed.pathname.startsWith(p.pathPrefix);
-        if (p.pathExact)  return p.pathExact.includes(parsed.pathname);
-        return parsed.pathname === '/';
-      });
-    } catch { return false; }
-  }
-
-  domainGroups = [];
-  const groupMap    = {};
-  const landingTabs = [];
-
-  // Custom group rules from config.local.js (if any)
-  const customGroups = typeof LOCAL_CUSTOM_GROUPS !== 'undefined' ? LOCAL_CUSTOM_GROUPS : [];
-
-  // Check if a URL matches a custom group rule; returns the rule or null
-  function matchCustomGroup(url) {
-    try {
-      const parsed = new URL(url);
-      return customGroups.find(r => {
-        const hostMatch = r.hostname
-          ? parsed.hostname === r.hostname
-          : r.hostnameEndsWith
-            ? parsed.hostname.endsWith(r.hostnameEndsWith)
-            : false;
-        if (!hostMatch) return false;
-        if (r.pathPrefix) return parsed.pathname.startsWith(r.pathPrefix);
-        return true; // hostname matched, no path filter
-      }) || null;
-    } catch { return null; }
-  }
-
-  for (const tab of realTabs) {
-    try {
-      if (isLandingPage(tab.url)) {
-        landingTabs.push(tab);
-        continue;
+      const [folder] = await browser.bookmarks.get(stored[BOOKMARK_FOLDER_KEY]);
+      if (folder && !folder.url) {
+        state.tabOutBookmarkFolderId = folder.id;
+        return folder.id;
       }
-
-      // Check custom group rules first (e.g. merge subdomains, split by path)
-      const customRule = matchCustomGroup(tab.url);
-      if (customRule) {
-        const key = customRule.groupKey;
-        if (!groupMap[key]) groupMap[key] = { domain: key, label: customRule.groupLabel, tabs: [] };
-        groupMap[key].tabs.push(tab);
-        continue;
-      }
-
-      let hostname;
-      if (tab.url && tab.url.startsWith('file://')) {
-        hostname = 'local-files';
-      } else {
-        hostname = new URL(tab.url).hostname;
-      }
-      if (!hostname) continue;
-
-      if (!groupMap[hostname]) groupMap[hostname] = { domain: hostname, tabs: [] };
-      groupMap[hostname].tabs.push(tab);
     } catch {
-      // Skip malformed URLs
+      // Folder was probably deleted. Recreate below.
     }
   }
 
-  if (landingTabs.length > 0) {
-    groupMap['__landing-pages__'] = { domain: '__landing-pages__', tabs: landingTabs };
+  const tree = await browser.bookmarks.getTree();
+  const folders = flattenBookmarks(tree).filter(node => !node.url && node.title === BOOKMARK_FOLDER_TITLE);
+  const existing = folders.find(node => node.id !== 'root________') || folders[0];
+  if (existing) {
+    state.tabOutBookmarkFolderId = existing.id;
+    await browser.storage.local.set({ [BOOKMARK_FOLDER_KEY]: existing.id });
+    return existing.id;
   }
 
-  // Sort: landing pages first, then domains from landing page sites, then by tab count
-  // Collect exact hostnames and suffix patterns for priority sorting
-  const landingHostnames = new Set(LANDING_PAGE_PATTERNS.map(p => p.hostname).filter(Boolean));
-  const landingSuffixes = LANDING_PAGE_PATTERNS.map(p => p.hostnameEndsWith).filter(Boolean);
-  function isLandingDomain(domain) {
-    if (landingHostnames.has(domain)) return true;
-    return landingSuffixes.some(s => domain.endsWith(s));
+  const parent = await findWritableBookmarkParent();
+  if (!parent) throw new Error('No writable bookmark parent found');
+
+  const created = await browser.bookmarks.create({
+    parentId: parent.id,
+    title: BOOKMARK_FOLDER_TITLE,
+  });
+  state.tabOutBookmarkFolderId = created.id;
+  await browser.storage.local.set({ [BOOKMARK_FOLDER_KEY]: created.id });
+  return created.id;
+}
+
+async function fetchBookmarks() {
+  if (!browser.bookmarks) return;
+
+  const folderId = await ensureBookmarkFolder();
+  const tree = await browser.bookmarks.getTree();
+  const all = flattenBookmarks(tree).filter(node => node.url);
+  const index = new Map();
+  for (const bookmark of all) {
+    const key = urlKey(bookmark.url);
+    if (!index.has(key)) index.set(key, []);
+    index.get(key).push(bookmark);
   }
-  domainGroups = Object.values(groupMap).sort((a, b) => {
-    const aIsLanding = a.domain === '__landing-pages__';
-    const bIsLanding = b.domain === '__landing-pages__';
-    if (aIsLanding !== bIsLanding) return aIsLanding ? -1 : 1;
+  state.bookmarkIndex = index;
 
-    const aIsPriority = isLandingDomain(a.domain);
-    const bIsPriority = isLandingDomain(b.domain);
-    if (aIsPriority !== bIsPriority) return aIsPriority ? -1 : 1;
+  try {
+    state.tabOutBookmarks = (await browser.bookmarks.getChildren(folderId))
+      .filter(node => node.url)
+      .sort((a, b) => (b.dateAdded || 0) - (a.dateAdded || 0));
+  } catch {
+    state.tabOutBookmarks = [];
+  }
+}
 
-    return b.tabs.length - a.tabs.length;
+async function getSavedTabs() {
+  const { deferred = [] } = await browser.storage.local.get('deferred');
+  const visible = Array.isArray(deferred) ? deferred.filter(tab => !tab.dismissed) : [];
+  state.deferredActive = visible.filter(tab => !tab.completed);
+  state.deferredArchived = visible.filter(tab => tab.completed);
+}
+
+async function saveTabForLater(tab) {
+  const { deferred = [] } = await browser.storage.local.get('deferred');
+  const next = Array.isArray(deferred) ? deferred : [];
+  next.push({
+    id: Date.now().toString(),
+    url: tab.url,
+    title: tab.title || tab.url,
+    savedAt: new Date().toISOString(),
+    completed: false,
+    dismissed: false,
+  });
+  await browser.storage.local.set({ deferred: next });
+  devLog('saved.add', { url: tab.url });
+}
+
+async function updateSavedTab(id, patch) {
+  const { deferred = [] } = await browser.storage.local.get('deferred');
+  const next = Array.isArray(deferred) ? deferred : [];
+  const item = next.find(tab => tab.id === id);
+  if (!item) return;
+  Object.assign(item, patch);
+  await browser.storage.local.set({ deferred: next });
+}
+
+function bookmarkStatusForUrl(url) {
+  const bookmarks = state.bookmarkIndex.get(urlKey(url)) || [];
+  const tabOutBookmark = bookmarks.find(node => node.parentId === state.tabOutBookmarkFolderId);
+  return {
+    bookmarked: bookmarks.length > 0,
+    external: bookmarks.some(node => node.parentId !== state.tabOutBookmarkFolderId),
+    tabOutBookmark,
+  };
+}
+
+async function toggleBookmarkForTab(tab) {
+  const status = bookmarkStatusForUrl(tab.url);
+
+  if (status.tabOutBookmark) {
+    await browser.bookmarks.remove(status.tabOutBookmark.id);
+    devLog('bookmark.remove-tabout', { url: tab.url });
+    showToast('Removed from Tab Out favorites');
+    return;
+  }
+
+  const folderId = await ensureBookmarkFolder();
+  await browser.bookmarks.create({
+    parentId: folderId,
+    title: tab.title || tab.url,
+    url: tab.url,
+  });
+  devLog('bookmark.create-tabout', { url: tab.url, externalAlreadyExists: status.external });
+  showToast(status.external ? 'Saved a Tab Out copy of this favorite' : 'Saved to favorites');
+}
+
+async function closeTabOutDupes() {
+  const url = dashboardUrl();
+  const tabs = await browser.tabs.query({});
+  const dashboards = tabs.filter(tab => tab.url === url);
+  if (dashboards.length <= 1) return;
+
+  const currentWindow = await browser.windows.getCurrent();
+  const keep =
+    dashboards.find(tab => tab.active && tab.windowId === currentWindow.id) ||
+    dashboards.find(tab => tab.active) ||
+    dashboards[0];
+  const toClose = dashboards.filter(tab => tab.id !== keep.id).map(tab => tab.id);
+  if (toClose.length > 0) await browser.tabs.remove(toClose);
+  devLog('tabout.close-dupes', { closed: toClose.length });
+}
+
+async function focusTab(tabId) {
+  const tab = getTabById(tabId);
+  if (!tab || tab.id == null) return;
+  await browser.tabs.update(tab.id, { active: true });
+  if (tab.windowId != null) await browser.windows.update(tab.windowId, { focused: true });
+  devLog('tab.focus', { tabId });
+}
+
+async function closeTabsByIds(tabIds) {
+  const ids = tabIds.filter(id => Number.isInteger(id));
+  if (ids.length === 0) return;
+  await browser.tabs.remove(ids);
+  devLog('tabs.close', { count: ids.length, tabIds: ids });
+}
+
+async function createFirefoxGroup(groupId) {
+  const group = state.groups.find(item => item.id === groupId);
+  if (!group || group.type !== 'smart') return;
+  if (!browser.tabs.group || !browser.tabGroups || !browser.tabGroups.update) {
+    showToast('Firefox tab groups API is not available');
+    return;
+  }
+
+  const tabIds = group.tabs.map(tab => tab.id).filter(id => Number.isInteger(id));
+  if (tabIds.length === 0) return;
+
+  const firefoxGroupId = await browser.tabs.group({ tabIds });
+  await browser.tabGroups.update(firefoxGroupId, {
+    title: group.label,
+    color: pickGroupColor(group.kind),
+  });
+  devLog('tabGroups.create-from-smart', { groupId, firefoxGroupId, tabCount: tabIds.length });
+  showToast(`Created Firefox group: ${group.label}`);
+}
+
+function pickGroupColor(kind) {
+  if (kind === 'homepages') return 'blue';
+  if (kind === 'local-dev') return 'green';
+  if (kind === 'local-files') return 'grey';
+  if (kind === 'custom') return 'purple';
+  return 'cyan';
+}
+
+async function closeDuplicates(groupId) {
+  const group = state.groups.find(item => item.id === groupId);
+  if (!group) return;
+
+  const toClose = [];
+  for (const url of group.duplicates.duplicateUrls) {
+    const matching = group.tabs.filter(tab => tab.url === url);
+    const keep = matching.find(tab => tab.active) || matching[0];
+    for (const tab of matching) {
+      if (tab.id !== keep.id) toClose.push(tab.id);
+    }
+  }
+
+  await closeTabsByIds(toClose);
+  showToast(`Closed ${toClose.length} duplicate${toClose.length !== 1 ? 's' : ''}`);
+}
+
+function buildGroups() {
+  const landingPagePatterns = typeof LOCAL_LANDING_PAGE_PATTERNS !== 'undefined'
+    ? LOCAL_LANDING_PAGE_PATTERNS
+    : [];
+  const customGroups = typeof LOCAL_CUSTOM_GROUPS !== 'undefined'
+    ? LOCAL_CUSTOM_GROUPS
+    : [];
+
+  state.groups = groupTabs(state.allTabs, state.firefoxGroups, {
+    extensionUrl: dashboardUrl(),
+    landingPagePatterns,
+    customGroups,
+  });
+  devLog('groups.build', {
+    groups: state.groups.length,
+    firefox: state.groups.filter(group => group.type === 'firefox').length,
+    smart: state.groups.filter(group => group.type === 'smart').length,
+  });
+}
+
+function scheduleRefresh(reason) {
+  state.pendingReason = reason;
+  clearTimeout(state.refreshTimer);
+  state.refreshTimer = setTimeout(() => {
+    refreshDashboard(state.pendingReason || 'scheduled');
+  }, 150);
+}
+
+async function refreshDashboard(reason = 'manual') {
+  if (state.refreshInFlight) {
+    scheduleRefresh(reason);
+    return;
+  }
+
+  state.refreshInFlight = true;
+  try {
+    devLog('refresh.start', { reason });
+    await fetchOpenTabs();
+    await fetchFirefoxGroups();
+    await getSavedTabs();
+    await fetchBookmarks();
+    buildGroups();
+    renderDashboard(reason);
+    devLog('refresh.complete', {
+      reason,
+      tabs: state.realTabs.length,
+      groups: state.groups.length,
+      bookmarks: state.tabOutBookmarks.length,
+    });
+  } catch (error) {
+    console.error('[tab-out] refresh failed', error);
+    devLog('refresh.failed', { reason, message: error.message });
+    showToast('Refresh failed');
+  } finally {
+    state.refreshInFlight = false;
+  }
+}
+
+function filterGroups() {
+  const query = (state.ui.query || '').trim().toLowerCase();
+  let groups = [...state.groups];
+
+  if (state.ui.filter === 'firefox') groups = groups.filter(group => group.type === 'firefox');
+  if (state.ui.filter === 'smart') groups = groups.filter(group => group.type === 'smart');
+  if (state.ui.filter === 'duplicates') groups = groups.filter(group => group.duplicates.duplicateExtras > 0);
+  if (state.ui.filter === 'bookmarked') {
+    groups = groups
+      .map(group => ({
+        ...group,
+        tabs: group.tabs.filter(tab => bookmarkStatusForUrl(tab.url).bookmarked),
+      }))
+      .filter(group => group.tabs.length > 0);
+  }
+
+  if (!query) return groups;
+
+  return groups
+    .map(group => ({
+      ...group,
+      tabs: group.tabs.filter(tab => {
+        const haystack = [
+          tab.title,
+          tab.url,
+          group.label,
+          ...group.sites,
+        ].join(' ').toLowerCase();
+        return haystack.includes(query);
+      }),
+    }))
+    .filter(group =>
+      group.tabs.length > 0 ||
+      group.label.toLowerCase().includes(query) ||
+      group.sites.some(site => site.toLowerCase().includes(query))
+    );
+}
+
+function renderDashboard(reason) {
+  renderStats(reason);
+  renderTabOutDupeBanner();
+  renderFilterButtons();
+  renderGroups();
+  renderSavedPanel();
+  renderBookmarksPanel();
+}
+
+function renderStats(reason) {
+  const groups = state.groups;
+  const firefoxCount = groups.filter(group => group.type === 'firefox').length;
+  const smartCount = groups.filter(group => group.type === 'smart').length;
+  const duplicateGroups = groups.filter(group => group.duplicates.duplicateExtras > 0).length;
+  const bookmarkedTabs = state.realTabs.filter(tab => bookmarkStatusForUrl(tab.url).bookmarked).length;
+
+  $('statTabs').textContent = state.realTabs.length;
+  $('statGroups').textContent = groups.length;
+  $('statBookmarks').textContent = state.tabOutBookmarks.length;
+  $('countAll').textContent = groups.length;
+  $('countFirefox').textContent = firefoxCount;
+  $('countSmart').textContent = smartCount;
+  $('countDuplicates').textContent = duplicateGroups;
+  $('countBookmarked').textContent = bookmarkedTabs;
+  $('lastRefresh').textContent = nowTime();
+
+  browser.storage.local.get(DEV_LOG_KEY).then(data => {
+    const logs = Array.isArray(data[DEV_LOG_KEY]) ? data[DEV_LOG_KEY] : [];
+    const el = $('devLogCount');
+    if (el) el.textContent = logs.length;
   });
 
-  // --- Render domain cards ---
-  const openTabsSection      = document.getElementById('openTabsSection');
-  const openTabsMissionsEl   = document.getElementById('openTabsMissions');
-  const openTabsSectionCount = document.getElementById('openTabsSectionCount');
-  const openTabsSectionTitle = document.getElementById('openTabsSectionTitle');
+  const summary = $('groupsSummary');
+  if (summary) {
+    summary.textContent = `${groups.length} groups from ${state.realTabs.length} tabs. Last update: ${reason}.`;
+  }
+}
 
-  if (domainGroups.length > 0 && openTabsSection) {
-    if (openTabsSectionTitle) openTabsSectionTitle.textContent = 'Open tabs';
-    openTabsSectionCount.innerHTML = `${domainGroups.length} domain${domainGroups.length !== 1 ? 's' : ''} &nbsp;&middot;&nbsp; <button class="action-btn close-tabs" data-action="close-all-open-tabs" style="font-size:11px;padding:3px 10px;">${ICONS.close} Close all ${realTabs.length} tabs</button>`;
-    openTabsMissionsEl.innerHTML = domainGroups.map(g => renderDomainCard(g)).join('');
-    openTabsSection.style.display = 'block';
-  } else if (openTabsSection) {
-    openTabsSection.style.display = 'none';
+function renderFilterButtons() {
+  document.querySelectorAll('.filter-btn').forEach(button => {
+    button.classList.toggle('active', button.dataset.filter === state.ui.filter);
+  });
+}
+
+function renderTabOutDupeBanner() {
+  const banner = $('tabOutDupeBanner');
+  const count = $('tabOutDupeCount');
+  if (!banner || !count) return;
+
+  const tabOutTabs = state.allTabs.filter(tab => tab.isTabOut);
+  if (tabOutTabs.length > 1) {
+    count.textContent = tabOutTabs.length;
+    banner.hidden = false;
+  } else {
+    banner.hidden = true;
+  }
+}
+
+function renderGroups() {
+  const groups = filterGroups();
+  const list = $('groupsList');
+  const empty = $('emptyGroups');
+  if (!list || !empty) return;
+
+  if (groups.length === 0) {
+    clearElement(list);
+    empty.hidden = false;
+    return;
   }
 
-  // --- Footer stats ---
-  const statTabs = document.getElementById('statTabs');
-  if (statTabs) statTabs.textContent = openTabs.length;
-
-  // --- Check for duplicate Tab Out tabs ---
-  checkTabOutDupes();
-
-  // --- Render "Saved for Later" column ---
-  await renderDeferredColumn();
+  empty.hidden = true;
+  clearElement(list);
+  for (const group of groups) {
+    list.appendChild(renderGroupNode(group));
+  }
 }
 
-async function renderDashboard() {
-  await renderStaticDashboard();
+function renderGroupNode(group) {
+  const duplicateExtras = group.duplicates.duplicateExtras;
+  const isExpanded = state.ui.expandedGroups[group.id] !== false;
+  const typeLabel = group.type === 'firefox' ? 'Firefox' : smartKindLabel(group.kind);
+  const card = createNode('article', `group-card${group.color ? ` group-color-${group.color}` : ''}`);
+  card.dataset.groupId = group.id;
+
+  const header = createNode('header', 'group-header');
+  const collapse = createActionButton('toggle-group', isExpanded ? '-' : '+', 'collapse-btn', { groupId: group.id }, 'Collapse group');
+  header.appendChild(collapse);
+
+  const titleBlock = createNode('div', 'group-title-block');
+  const titleRow = createNode('div', 'group-title-row');
+  titleRow.appendChild(createNode('h3', '', group.label));
+  titleRow.appendChild(createBadge(`type-badge ${group.type}`, typeLabel));
+  if (group.collapsed) titleRow.appendChild(createBadge('meta-badge', 'collapsed in Firefox'));
+  if (duplicateExtras) {
+    titleRow.appendChild(createBadge('duplicate-badge', `${duplicateExtras} duplicate${duplicateExtras !== 1 ? 's' : ''}`));
+  }
+
+  const siteStrip = createNode('div', 'site-strip');
+  for (const site of group.sites.slice(0, 5)) {
+    siteStrip.appendChild(createBadge('', site));
+  }
+  if (group.sites.length > 5) {
+    siteStrip.appendChild(createBadge('', `+${group.sites.length - 5}`));
+  }
+  titleBlock.appendChild(titleRow);
+  titleBlock.appendChild(siteStrip);
+  header.appendChild(titleBlock);
+
+  const actions = createNode('div', 'group-actions');
+  if (group.type === 'smart') {
+    actions.appendChild(createActionButton('create-firefox-group', 'Create Firefox group', 'subtle-btn', { groupId: group.id }));
+  }
+  if (duplicateExtras) {
+    actions.appendChild(createActionButton('close-duplicates', 'Close duplicates', 'subtle-btn', { groupId: group.id }));
+  }
+  actions.appendChild(createActionButton('close-group', `Close ${group.tabs.length}`, 'danger-btn', { groupId: group.id }));
+  header.appendChild(actions);
+
+  const tabList = createNode('div', 'tab-list');
+  tabList.hidden = !isExpanded;
+  for (const tab of group.tabs) {
+    tabList.appendChild(renderTabRowNode(tab, group));
+  }
+
+  card.appendChild(header);
+  card.appendChild(tabList);
+  return card;
 }
 
+function smartKindLabel(kind) {
+  if (kind === 'homepages') return 'Homepages';
+  if (kind === 'local-dev') return 'Local/dev';
+  if (kind === 'local-files') return 'Files';
+  if (kind === 'custom') return 'Rule';
+  return 'Domain';
+}
 
-/* ----------------------------------------------------------------
-   EVENT HANDLERS — using event delegation
+function renderTabRowNode(tab, group) {
+  const bookmark = bookmarkStatusForUrl(tab.url);
+  const count = group.duplicates.urlCounts[urlKey(tab.url)] || 1;
+  const title = tabDisplayTitle(tab);
+  const site = siteFromUrl(tab.url);
+  const bookmarkTitle = bookmark.tabOutBookmark
+    ? 'Remove from Tab Out favorites'
+    : bookmark.external
+      ? 'Also save in Tab Out favorites'
+      : 'Save to favorites';
+  const row = createNode('div', `tab-row ${tab.active ? 'active-tab' : ''}`);
+  row.dataset.tabId = String(tab.id);
 
-   One listener on document handles ALL button clicks.
-   Think of it as one security guard watching the whole building
-   instead of one per door.
-   ---------------------------------------------------------------- */
+  const main = createActionButton('focus-tab', '', 'tab-main', { tabId: tab.id }, tab.url);
+  main.appendChild(createNode('span', 'tab-title', title));
+  main.appendChild(createNode('span', 'tab-url', site));
+  row.appendChild(main);
 
-document.addEventListener('click', async (e) => {
-  // Walk up the DOM to find the nearest element with data-action
-  const actionEl = e.target.closest('[data-action]');
+  const badges = createNode('div', 'tab-badges');
+  if (tab.pinned) badges.appendChild(createBadge('meta-badge', 'pinned'));
+  if (tab.discarded) badges.appendChild(createBadge('meta-badge', 'discarded'));
+  if (count > 1) badges.appendChild(createBadge('duplicate-badge', `${count}x`));
+  if (bookmark.external && !bookmark.tabOutBookmark) badges.appendChild(createBadge('meta-badge', 'external fav'));
+  row.appendChild(badges);
+
+  const actions = createNode('div', 'tab-actions');
+  actions.appendChild(createActionButton('toggle-bookmark', 'Star', `icon-only ${bookmark.bookmarked ? 'is-bookmarked' : ''}`, { tabId: tab.id }, bookmarkTitle));
+  actions.appendChild(createActionButton('save-later', 'Save', 'icon-only', { tabId: tab.id }, 'Save for later and close'));
+  actions.appendChild(createActionButton('focus-tab', 'Go', 'icon-only', { tabId: tab.id }, 'Focus tab'));
+  actions.appendChild(createActionButton('close-tab', 'X', 'icon-only danger', { tabId: tab.id }, 'Close tab'));
+  row.appendChild(actions);
+
+  return row;
+}
+
+function renderSavedPanel() {
+  const active = state.deferredActive;
+  const archived = state.deferredArchived;
+  const list = $('deferredList');
+  const empty = $('deferredEmpty');
+  const count = $('deferredCount');
+  const archiveCount = $('archiveCount');
+  const archiveBody = $('archiveBody');
+  const archiveList = $('archiveList');
+
+  count.textContent = active.length;
+  archiveCount.textContent = archived.length ? `(${archived.length})` : '';
+
+  if (active.length === 0) {
+    clearElement(list);
+    empty.hidden = false;
+  } else {
+    empty.hidden = true;
+    clearElement(list);
+    for (const item of active) {
+      list.appendChild(renderSavedItemNode(item));
+    }
+  }
+
+  archiveBody.hidden = !state.ui.archiveOpen;
+  const query = (state.ui.archiveQuery || '').toLowerCase();
+  const archiveItems = query
+    ? archived.filter(item => `${item.title || ''} ${item.url || ''}`.toLowerCase().includes(query))
+    : archived;
+  clearElement(archiveList);
+  if (archiveItems.length === 0) {
+    archiveList.appendChild(createNode('div', 'empty-inline', 'No archived results.'));
+  } else {
+    for (const item of archiveItems) {
+      archiveList.appendChild(renderArchiveItemNode(item));
+    }
+  }
+}
+
+function renderSavedItemNode(item) {
+  const row = createNode('div', 'saved-row');
+  row.dataset.deferredId = item.id;
+  row.appendChild(createActionButton('check-deferred', '', 'check-btn', { deferredId: item.id }, 'Mark done'));
+
+  const link = createNode('a', '', item.title || item.url);
+  link.href = safeHref(item.url);
+  link.target = '_blank';
+  link.rel = 'noopener';
+  link.title = item.url || '';
+  row.appendChild(link);
+
+  row.appendChild(createActionButton('dismiss-deferred', 'X', 'icon-only danger', { deferredId: item.id }, 'Dismiss'));
+  return row;
+}
+
+function renderArchiveItemNode(item) {
+  const ago = item.completedAt ? timeAgo(item.completedAt) : timeAgo(item.savedAt);
+  const row = createNode('div', 'archive-row');
+  const link = createNode('a', '', item.title || item.url);
+  link.href = safeHref(item.url);
+  link.target = '_blank';
+  link.rel = 'noopener';
+  link.title = item.url || '';
+  row.appendChild(link);
+  row.appendChild(createNode('span', '', ago));
+  return row;
+}
+
+function renderBookmarksPanel() {
+  const list = $('bookmarkList');
+  const empty = $('bookmarkEmpty');
+  const count = $('bookmarkCount');
+  const query = (state.ui.bookmarkQuery || '').toLowerCase();
+  const bookmarks = query
+    ? state.tabOutBookmarks.filter(item => `${item.title || ''} ${item.url || ''}`.toLowerCase().includes(query))
+    : state.tabOutBookmarks;
+
+  count.textContent = state.tabOutBookmarks.length;
+  if (bookmarks.length === 0) {
+    clearElement(list);
+    empty.hidden = false;
+    return;
+  }
+
+  empty.hidden = true;
+  clearElement(list);
+  for (const bookmark of bookmarks) {
+    list.appendChild(renderBookmarkNode(bookmark));
+  }
+}
+
+function renderBookmarkNode(bookmark) {
+  const row = createNode('div', 'bookmark-row');
+  row.dataset.bookmarkId = bookmark.id;
+
+  const main = createActionButton('open-bookmark', '', 'bookmark-main', { url: bookmark.url }, bookmark.url);
+  main.appendChild(createNode('span', '', bookmark.title || bookmark.url));
+  main.appendChild(createNode('small', '', siteFromUrl(bookmark.url)));
+  row.appendChild(main);
+  row.appendChild(createActionButton('remove-tabout-bookmark', 'X', 'icon-only danger', { bookmarkId: bookmark.id }, 'Remove Tab Out favorite'));
+  return row;
+}
+
+async function handleClick(event) {
+  const actionEl = event.target.closest('[data-action]');
   if (!actionEl) return;
 
   const action = actionEl.dataset.action;
-
-  // ---- Close duplicate Tab Out tabs ----
-  if (action === 'close-tabout-dupes') {
-    await closeTabOutDupes();
-    playCloseSound();
-    const banner = document.getElementById('tabOutDupeBanner');
-    if (banner) {
-      banner.style.transition = 'opacity 0.4s';
-      banner.style.opacity = '0';
-      setTimeout(() => { banner.style.display = 'none'; banner.style.opacity = '1'; }, 400);
-    }
-    showToast('Closed extra Tab Out tabs');
-    return;
-  }
-
-  const card = actionEl.closest('.mission-card');
-
-  // ---- Expand overflow chips ("+N more") ----
-  if (action === 'expand-chips') {
-    const overflowContainer = actionEl.parentElement.querySelector('.page-chips-overflow');
-    if (overflowContainer) {
-      overflowContainer.style.display = 'contents';
-      actionEl.remove();
-    }
-    return;
-  }
-
-  // ---- Focus a specific tab ----
-  if (action === 'focus-tab') {
-    const tabUrl = actionEl.dataset.tabUrl;
-    if (tabUrl) await focusTab(tabUrl);
-    return;
-  }
-
-  // ---- Close a single tab ----
-  if (action === 'close-single-tab') {
-    e.stopPropagation(); // don't trigger parent chip's focus-tab
-    const tabUrl = actionEl.dataset.tabUrl;
-    if (!tabUrl) return;
-
-    // Close the tab in Firefox directly
-    const allTabs = await browser.tabs.query({});
-    const match   = allTabs.find(t => t.url === tabUrl);
-    if (match) await browser.tabs.remove(match.id);
-    await fetchOpenTabs();
-
-    playCloseSound();
-
-    // Animate the chip row out
-    const chip = actionEl.closest('.page-chip');
-    if (chip) {
-      const rect = chip.getBoundingClientRect();
-      shootConfetti(rect.left + rect.width / 2, rect.top + rect.height / 2);
-      chip.style.transition = 'opacity 0.2s, transform 0.2s';
-      chip.style.opacity    = '0';
-      chip.style.transform  = 'scale(0.8)';
-      setTimeout(() => {
-        chip.remove();
-        // If the card now has no tabs, remove it too
-        const parentCard = document.querySelector('.mission-card:has(.mission-pages:empty)');
-        if (parentCard) animateCardOut(parentCard);
-        document.querySelectorAll('.mission-card').forEach(c => {
-          if (c.querySelectorAll('.page-chip[data-action="focus-tab"]').length === 0) {
-            animateCardOut(c);
-          }
-        });
-      }, 200);
-    }
-
-    // Update footer
-    const statTabs = document.getElementById('statTabs');
-    if (statTabs) statTabs.textContent = openTabs.length;
-
-    showToast('Tab closed');
-    return;
-  }
-
-  // ---- Save a single tab for later (then close it) ----
-  if (action === 'defer-single-tab') {
-    e.stopPropagation();
-    const tabUrl   = actionEl.dataset.tabUrl;
-    const tabTitle = actionEl.dataset.tabTitle || tabUrl;
-    if (!tabUrl) return;
-
-    // Save to browser.storage.local
-    try {
-      await saveTabForLater({ url: tabUrl, title: tabTitle });
-    } catch (err) {
-      console.error('[tab-out] Failed to save tab:', err);
-      showToast('Failed to save tab');
-      return;
-    }
-
-    // Close the tab in Firefox
-    const allTabs = await browser.tabs.query({});
-    const match   = allTabs.find(t => t.url === tabUrl);
-    if (match) await browser.tabs.remove(match.id);
-    await fetchOpenTabs();
-
-    // Animate chip out
-    const chip = actionEl.closest('.page-chip');
-    if (chip) {
-      chip.style.transition = 'opacity 0.2s, transform 0.2s';
-      chip.style.opacity    = '0';
-      chip.style.transform  = 'scale(0.8)';
-      setTimeout(() => chip.remove(), 200);
-    }
-
-    showToast('Saved for later');
-    await renderDeferredColumn();
-    return;
-  }
-
-  // ---- Check off a saved tab (moves it to archive) ----
-  if (action === 'check-deferred') {
-    const id = actionEl.dataset.deferredId;
-    if (!id) return;
-
-    await checkOffSavedTab(id);
-
-    // Animate: strikethrough first, then slide out
-    const item = actionEl.closest('.deferred-item');
-    if (item) {
-      item.classList.add('checked');
-      setTimeout(() => {
-        item.classList.add('removing');
-        setTimeout(() => {
-          item.remove();
-          renderDeferredColumn(); // refresh counts and archive
-        }, 300);
-      }, 800);
-    }
-    return;
-  }
-
-  // ---- Dismiss a saved tab (removes it entirely) ----
-  if (action === 'dismiss-deferred') {
-    const id = actionEl.dataset.deferredId;
-    if (!id) return;
-
-    await dismissSavedTab(id);
-
-    const item = actionEl.closest('.deferred-item');
-    if (item) {
-      item.classList.add('removing');
-      setTimeout(() => {
-        item.remove();
-        renderDeferredColumn();
-      }, 300);
-    }
-    return;
-  }
-
-  // ---- Close all tabs in a domain group ----
-  if (action === 'close-domain-tabs') {
-    const domainId = actionEl.dataset.domainId;
-    const group    = domainGroups.find(g => {
-      return 'domain-' + g.domain.replace(/[^a-z0-9]/g, '-') === domainId;
-    });
-    if (!group) return;
-
-    const urls      = group.tabs.map(t => t.url);
-    // Landing pages and custom groups (whose domain key isn't a real hostname)
-    // must use exact URL matching to avoid closing unrelated tabs
-    const useExact  = group.domain === '__landing-pages__' || !!group.label;
-
-    if (useExact) {
-      await closeTabsExact(urls);
-    } else {
-      await closeTabsByUrls(urls);
-    }
-
-    if (card) {
-      playCloseSound();
-      animateCardOut(card);
-    }
-
-    // Remove from in-memory groups
-    const idx = domainGroups.indexOf(group);
-    if (idx !== -1) domainGroups.splice(idx, 1);
-
-    const groupLabel = group.domain === '__landing-pages__' ? 'Homepages' : (group.label || friendlyDomain(group.domain));
-    showToast(`Closed ${urls.length} tab${urls.length !== 1 ? 's' : ''} from ${groupLabel}`);
-
-    const statTabs = document.getElementById('statTabs');
-    if (statTabs) statTabs.textContent = openTabs.length;
-    return;
-  }
-
-  // ---- Close duplicates, keep one copy ----
-  if (action === 'dedup-keep-one') {
-    const urlsEncoded = actionEl.dataset.dupeUrls || '';
-    const urls = urlsEncoded.split(',').map(u => decodeURIComponent(u)).filter(Boolean);
-    if (urls.length === 0) return;
-
-    await closeDuplicateTabs(urls, true);
-    playCloseSound();
-
-    // Hide the dedup button
-    actionEl.style.transition = 'opacity 0.2s';
-    actionEl.style.opacity    = '0';
-    setTimeout(() => actionEl.remove(), 200);
-
-    // Remove dupe badges from the card
-    if (card) {
-      card.querySelectorAll('.chip-dupe-badge').forEach(b => {
-        b.style.transition = 'opacity 0.2s';
-        b.style.opacity    = '0';
-        setTimeout(() => b.remove(), 200);
-      });
-      card.querySelectorAll('.open-tabs-badge').forEach(badge => {
-        if (badge.textContent.includes('duplicate')) {
-          badge.style.transition = 'opacity 0.2s';
-          badge.style.opacity    = '0';
-          setTimeout(() => badge.remove(), 200);
-        }
-      });
-      card.classList.remove('has-amber-bar');
-      card.classList.add('has-neutral-bar');
-    }
-
-    showToast('Closed duplicates, kept one copy each');
-    return;
-  }
-
-  // ---- Close ALL open tabs ----
-  if (action === 'close-all-open-tabs') {
-    const allUrls = openTabs
-      .filter(t => isUserFacingTabUrl(t.url))
-      .map(t => t.url);
-    await closeTabsByUrls(allUrls);
-    playCloseSound();
-
-    document.querySelectorAll('#openTabsMissions .mission-card').forEach(c => {
-      shootConfetti(
-        c.getBoundingClientRect().left + c.offsetWidth / 2,
-        c.getBoundingClientRect().top  + c.offsetHeight / 2
-      );
-      animateCardOut(c);
-    });
-
-    showToast('All tabs closed. Fresh start.');
-    return;
-  }
-});
-
-// ---- Archive toggle — expand/collapse the archive section ----
-document.addEventListener('click', (e) => {
-  const toggle = e.target.closest('#archiveToggle');
-  if (!toggle) return;
-
-  toggle.classList.toggle('open');
-  const body = document.getElementById('archiveBody');
-  if (body) {
-    body.style.display = body.style.display === 'none' ? 'block' : 'none';
-  }
-});
-
-// ---- Archive search — filter archived items as user types ----
-document.addEventListener('input', async (e) => {
-  if (e.target.id !== 'archiveSearch') return;
-
-  const q = e.target.value.trim().toLowerCase();
-  const archiveList = document.getElementById('archiveList');
-  if (!archiveList) return;
+  const tabId = Number(actionEl.dataset.tabId);
+  const groupId = actionEl.dataset.groupId;
 
   try {
-    const { archived } = await getSavedTabs();
-
-    if (q.length < 2) {
-      // Show all archived items
-      archiveList.innerHTML = archived.map(item => renderArchiveItem(item)).join('');
+    if (action === 'manual-refresh') {
+      await refreshDashboard('manual');
+      showToast('Refreshed');
       return;
     }
 
-    // Filter by title or URL containing the query string
-    const results = archived.filter(item =>
-      (item.title || '').toLowerCase().includes(q) ||
-      (item.url  || '').toLowerCase().includes(q)
-    );
+    if (action === 'set-filter') {
+      state.ui.filter = actionEl.dataset.filter || 'all';
+      await persistUiState();
+      renderDashboard('filter');
+      return;
+    }
 
-    archiveList.innerHTML = results.map(item => renderArchiveItem(item)).join('')
-      || '<div style="font-size:12px;color:var(--muted);padding:8px 0">No results</div>';
-  } catch (err) {
-    console.warn('[tab-out] Archive search failed:', err);
+    if (action === 'toggle-group') {
+      state.ui.expandedGroups[groupId] = state.ui.expandedGroups[groupId] === false;
+      await persistUiState();
+      renderGroups();
+      return;
+    }
+
+    if (action === 'focus-tab') {
+      await focusTab(tabId);
+      return;
+    }
+
+    if (action === 'close-tab') {
+      await closeTabsByIds([tabId]);
+      showToast('Tab closed');
+      scheduleRefresh('action.close-tab');
+      return;
+    }
+
+    if (action === 'save-later') {
+      const tab = getTabById(tabId);
+      if (!tab) return;
+      await saveTabForLater(tab);
+      await closeTabsByIds([tabId]);
+      showToast('Saved for later');
+      scheduleRefresh('action.save-later');
+      return;
+    }
+
+    if (action === 'toggle-bookmark') {
+      const tab = getTabById(tabId);
+      if (!tab) return;
+      await toggleBookmarkForTab(tab);
+      scheduleRefresh('action.toggle-bookmark');
+      return;
+    }
+
+    if (action === 'close-group') {
+      const group = state.groups.find(item => item.id === groupId);
+      if (!group) return;
+      await closeTabsByIds(group.tabs.map(tab => tab.id));
+      showToast(`Closed ${group.tabs.length} tabs`);
+      scheduleRefresh('action.close-group');
+      return;
+    }
+
+    if (action === 'create-firefox-group') {
+      await createFirefoxGroup(groupId);
+      scheduleRefresh('action.create-firefox-group');
+      return;
+    }
+
+    if (action === 'close-duplicates') {
+      await closeDuplicates(groupId);
+      scheduleRefresh('action.close-duplicates');
+      return;
+    }
+
+    if (action === 'close-all-open-tabs') {
+      await closeTabsByIds(state.realTabs.map(tab => tab.id));
+      showToast('All web tabs closed');
+      scheduleRefresh('action.close-all-open-tabs');
+      return;
+    }
+
+    if (action === 'close-tabout-dupes') {
+      await closeTabOutDupes();
+      showToast('Closed extra Tab Out tabs');
+      scheduleRefresh('action.close-tabout-dupes');
+      return;
+    }
+
+    if (action === 'check-deferred') {
+      await updateSavedTab(actionEl.dataset.deferredId, {
+        completed: true,
+        completedAt: new Date().toISOString(),
+      });
+      scheduleRefresh('action.check-deferred');
+      return;
+    }
+
+    if (action === 'dismiss-deferred') {
+      await updateSavedTab(actionEl.dataset.deferredId, { dismissed: true });
+      scheduleRefresh('action.dismiss-deferred');
+      return;
+    }
+
+    if (action === 'toggle-archive') {
+      state.ui.archiveOpen = !state.ui.archiveOpen;
+      await persistUiState();
+      renderSavedPanel();
+      return;
+    }
+
+    if (action === 'open-bookmark') {
+      const url = actionEl.dataset.url;
+      if (isUserFacingTabUrl(url)) await browser.tabs.create({ url });
+      devLog('bookmark.open', { url });
+      return;
+    }
+
+    if (action === 'remove-tabout-bookmark') {
+      const bookmarkId = actionEl.dataset.bookmarkId;
+      const bookmark = state.tabOutBookmarks.find(item => item.id === bookmarkId);
+      if (!bookmark) return;
+      await browser.bookmarks.remove(bookmarkId);
+      devLog('bookmark.remove-panel', { bookmarkId, url: bookmark.url });
+      showToast('Removed favorite');
+      scheduleRefresh('action.remove-bookmark');
+    }
+  } catch (error) {
+    console.error('[tab-out] action failed', action, error);
+    devLog('action.failed', { action, message: error.message });
+    showToast('Action failed');
   }
-});
+}
 
+function handleInput(event) {
+  const target = event.target;
+  if (target.id === 'globalSearch') {
+    state.ui.query = target.value;
+    persistUiState();
+    renderGroups();
+    renderStats('search');
+  }
+  if (target.id === 'bookmarkSearch') {
+    state.ui.bookmarkQuery = target.value;
+    persistUiState();
+    renderBookmarksPanel();
+  }
+  if (target.id === 'archiveSearch') {
+    state.ui.archiveQuery = target.value;
+    persistUiState();
+    renderSavedPanel();
+  }
+}
 
-/* ----------------------------------------------------------------
-   INITIALIZE
-   ---------------------------------------------------------------- */
+function registerLiveRefreshListeners() {
+  const tabsEvents = [
+    ['tabs.created', browser.tabs.onCreated],
+    ['tabs.removed', browser.tabs.onRemoved],
+    ['tabs.updated', browser.tabs.onUpdated],
+    ['tabs.moved', browser.tabs.onMoved],
+    ['tabs.attached', browser.tabs.onAttached],
+    ['tabs.detached', browser.tabs.onDetached],
+    ['tabs.activated', browser.tabs.onActivated],
+  ];
+
+  for (const [reason, eventTarget] of tabsEvents) {
+    if (!eventTarget || !eventTarget.addListener) continue;
+    eventTarget.addListener(() => scheduleRefresh(reason));
+  }
+
+  if (browser.tabGroups) {
+    const tabGroupEvents = [
+      ['tabGroups.created', browser.tabGroups.onCreated],
+      ['tabGroups.moved', browser.tabGroups.onMoved],
+      ['tabGroups.removed', browser.tabGroups.onRemoved],
+      ['tabGroups.updated', browser.tabGroups.onUpdated],
+    ];
+    for (const [reason, eventTarget] of tabGroupEvents) {
+      if (!eventTarget || !eventTarget.addListener) continue;
+      eventTarget.addListener(() => scheduleRefresh(reason));
+    }
+  }
+
+  if (browser.bookmarks) {
+    const bookmarkEvents = [
+      ['bookmarks.created', browser.bookmarks.onCreated],
+      ['bookmarks.removed', browser.bookmarks.onRemoved],
+      ['bookmarks.changed', browser.bookmarks.onChanged],
+      ['bookmarks.moved', browser.bookmarks.onMoved],
+    ];
+    for (const [reason, eventTarget] of bookmarkEvents) {
+      if (!eventTarget || !eventTarget.addListener) continue;
+      eventTarget.addListener(() => scheduleRefresh(reason));
+    }
+  }
+
+  browser.storage.onChanged.addListener((changes, areaName) => {
+    if (areaName !== 'local') return;
+    const keys = Object.keys(changes);
+    if (keys.every(key => key === DEV_LOG_KEY || key === UI_STATE_KEY)) return;
+    scheduleRefresh('storage.changed');
+  });
+
+  browser.runtime.onMessage.addListener(message => {
+    if (message && message.type === 'tab-out:refresh') {
+      scheduleRefresh(message.reason || 'runtime.message');
+    }
+  });
+}
+
 async function loadLocalConfig() {
   const configUrl = browser.runtime.getURL('config.local.js');
 
@@ -1509,6 +1056,17 @@ async function loadLocalConfig() {
   });
 }
 
-loadLocalConfig().finally(() => {
-  renderDashboard();
+async function init() {
+  document.addEventListener('click', handleClick);
+  document.addEventListener('input', handleInput);
+  await loadLocalConfig();
+  await loadUiState();
+  registerLiveRefreshListeners();
+  await refreshDashboard('initial');
+}
+
+init().catch(error => {
+  console.error('[tab-out] init failed', error);
+  devLog('init.failed', { message: error.message });
+  showToast('Tab Out failed to start');
 });
