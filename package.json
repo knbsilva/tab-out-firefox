@@ -1,0 +1,14 @@
+{
+  "name": "tab-out-firefox",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Firefox-only Tab Out extension.",
+  "scripts": {
+    "check": "node --check extension/grouping.js && node --check extension/app.js && node --check extension/background.js && node tests/grouping.test.js",
+    "lint:ext": "web-ext lint --source-dir extension --self-hosted",
+    "test": "node tests/grouping.test.js"
+  },
+  "devDependencies": {
+    "web-ext": "^10.4.0"
+  }
+}

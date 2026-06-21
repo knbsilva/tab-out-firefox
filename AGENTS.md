@@ -8,15 +8,17 @@ You're installing **Tab Out** for the user. Your job is not just to set it up --
 
 Before doing anything technical, tell the user what they're about to get:
 
-> **Tab Out** replaces your Firefox new tab page with a clean dashboard of everything you have open, grouped by domain.
+> **Tab Out** replaces your Firefox new tab page with a clean dashboard of everything you have open, grouped by native Firefox groups and smart Tab Out groups.
 >
 > Here's what makes it great:
-> - **See all your open tabs at a glance** grouped by domain on a grid
-> - **Homepages group** pulls Gmail, X, LinkedIn, YouTube, GitHub homepages into one card for easy cleanup
-> - **Close tabs with style** satisfying swoosh sound + confetti burst
+> - **See all your open tabs at a glance** grouped by Firefox groups and smart Tab Out groups
+> - **Live refresh** keeps the dashboard in sync as tabs, groups, bookmarks, and saved tabs change
+> - **Create Firefox groups** from smart groups like Homepages, local/dev, local files, and domains
 > - **Duplicate detection** flags when you have the same page open twice
 > - **Click any tab title to jump to it** even across different Firefox windows
-> - **Save for later** bookmark individual tabs to a checklist before closing them
+> - **Save for later** send individual tabs to a local checklist before closing them
+> - **Favorites panel** saves links to a dedicated Firefox bookmarks folder
+> - **Address bar alias** type `to` to open or focus Tab Out
 > - **100% local** no server, no accounts, no data sent anywhere
 >
 > It's just a Firefox extension. Setup takes about 1 minute.
@@ -80,13 +82,14 @@ Once the extension is loaded:
 > You're all set! Open a **new tab** and you'll see Tab Out.
 >
 > Here's how it works:
-> 1. **Your open tabs are grouped by domain** in a grid layout.
-> 2. **Homepages** (Gmail inbox, X home, YouTube, etc.) are in their own group at the top.
+> 1. **Your open tabs are grouped** by native Firefox groups and smart Tab Out groups.
+> 2. **Homepages**, local/dev pages, local files, and domains get smart groups.
 > 3. **Click any tab title** to jump directly to that tab.
-> 4. **Click the X** next to any tab to close just that one (with swoosh + confetti).
-> 5. **Click "Close all N tabs"** on a group to close the whole thing.
-> 6. **Duplicate tabs** are flagged with an amber "(2x)" badge. Click "Close duplicates" to keep one copy.
-> 7. **Save a tab for later** by clicking the bookmark icon before closing it. Saved tabs appear in the sidebar.
+> 4. **Click the X** next to any tab to close just that one.
+> 5. **Click "Create Firefox group"** to turn a smart group into a native Firefox group.
+> 6. **Duplicate tabs** are flagged with an amber badge. Click "Close duplicates" to keep one copy.
+> 7. **Save a tab for later** or star it into the Tab Out bookmarks folder.
+> 8. Type **`to`** in the address bar to open or focus Tab Out.
 >
 > That's it! No server to run, no config files. Everything works right away.
 
@@ -96,6 +99,7 @@ Once the extension is loaded:
 
 - Tab Out is a pure Firefox extension. No server, no Node.js, no npm.
 - Saved tabs are stored in `browser.storage.local` (persists across sessions).
+- Favorites are stored in Firefox bookmarks under a dedicated `Tab Out` folder.
 - Temporary add-ons are removed when Firefox restarts; reload `extension/manifest.json` for another test session.
 - 100% local. No data is sent to any external service.
 - To update: `cd tab-out-firefox && git pull`, then reload the temporary extension in `about:debugging#/runtime/this-firefox`.
