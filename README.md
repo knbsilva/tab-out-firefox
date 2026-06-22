@@ -27,7 +27,7 @@ The agent will walk you through loading it in Firefox. Takes about 1 minute.
 - **Smart groups** collect homepages, local/dev pages, local files, custom rules, and domains
 - **Create Firefox groups** from a smart Tab Out group
 - **Omnibox alias** type `to` in the address bar to open or focus Tab Out
-- **Favorites panel** saves links into a dedicated "Tab Out" bookmarks folder
+- **Saved tabs** stores links inside Tab Out storage; Firefox bookmarks are shown separately and can be copied into Saved tabs
 - **Duplicate detection** flags when you have the same page open twice, with one-click cleanup
 - **Click any tab to jump to it** across Firefox windows, no new tab opened
 - **Save for later** bookmark tabs to a checklist before closing them
@@ -66,11 +66,11 @@ You open a new tab
   -> Tab Out shows native Firefox groups and smart groups
   -> The dashboard refreshes as Firefox changes
   -> Click any tab title to jump to it
-  -> Save tabs for later or as Firefox bookmarks
+  -> Save tabs and sites into Tab Out storage
   -> Create native Firefox groups from smart groups
 ```
 
-Everything runs inside the Firefox extension. No external server, no API calls, no data sent anywhere. Saved tabs and UI state are stored in `browser.storage.local`; favorites use Firefox bookmarks.
+Everything runs inside the Firefox extension. No external server, no API calls, no data sent anywhere. Saved tabs, saved groups and UI state are stored in `browser.storage.local`; Firefox bookmarks are read separately and are not exported with Tab Out data.
 
 ---
 
@@ -80,7 +80,7 @@ Everything runs inside the Firefox extension. No external server, no API calls, 
 |------|-----|
 | Extension | Firefox WebExtensions Manifest V3 |
 | Storage | browser.storage.local |
-| Favorites | browser.bookmarks |
+| Firefox bookmarks view | browser.bookmarks |
 | Tab groups | browser.tabGroups + browser.tabs.group |
 | Address bar alias | browser.omnibox (`to`) |
 | Background | Firefox event page |

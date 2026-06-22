@@ -17,7 +17,7 @@ Before doing anything technical, tell the user what they're about to get:
 > - **Duplicate detection** flags when you have the same page open twice
 > - **Click any tab title to jump to it** even across different Firefox windows
 > - **Save for later** send individual tabs to a local checklist before closing them
-> - **Favorites panel** saves links to a dedicated Firefox bookmarks folder
+> - **Saved tabs** stores links in Tab Out storage, with Firefox bookmarks shown separately for copy/migration
 > - **Address bar alias** type `to` to open or focus Tab Out
 > - **100% local** no server, no accounts, no data sent anywhere
 >
@@ -88,7 +88,7 @@ Once the extension is loaded:
 > 4. **Click the X** next to any tab to close just that one.
 > 5. **Click "Create Firefox group"** to turn a smart group into a native Firefox group.
 > 6. **Duplicate tabs** are flagged with an amber badge. Click "Close duplicates" to keep one copy.
-> 7. **Save a tab for later** or star it into the Tab Out bookmarks folder.
+> 7. **Save a tab for later** or star it into Saved tabs.
 > 8. Type **`to`** in the address bar to open or focus Tab Out.
 >
 > That's it! No server to run, no config files. Everything works right away.
@@ -99,7 +99,7 @@ Once the extension is loaded:
 
 - Tab Out is a pure Firefox extension. No server, no Node.js, no npm.
 - Saved tabs are stored in `browser.storage.local` (persists across sessions).
-- Favorites are stored in Firefox bookmarks under a dedicated `Tab Out` folder.
+- Firefox bookmarks are viewed separately and can be copied into Saved tabs without changing browser bookmarks.
 - Temporary add-ons are removed when Firefox restarts; reload `extension/manifest.json` for another test session.
 - 100% local. No data is sent to any external service.
 - To update: `cd tab-out-firefox && git pull`, then reload the temporary extension in `about:debugging#/runtime/this-firefox`.

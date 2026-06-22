@@ -77,7 +77,7 @@ async function handleClick(event) {
   if (action === 'favorite-tab') {
     const response = await sendMessageOrThrow({ type: 'tab-out:favorite-active-tab' });
     const result = response.result || {};
-    setText('popupStatus', result.alreadyExists ? 'Already in Tab Out favorites' : 'Saved tab/site');
+    setText('popupStatus', result.alreadyExists ? 'Already in Saved tabs' : 'Saved tab/site');
     await loadSummary();
     return;
   }

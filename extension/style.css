@@ -598,6 +598,7 @@ svg {
 .deferred-list,
 .bookmark-list,
 .archive-list,
+.tab-view-list,
 .saved-group-list {
   display: flex;
   flex-direction: column;
@@ -632,6 +633,12 @@ svg {
   flex-direction: column;
   align-items: stretch;
   gap: 8px;
+}
+
+.open-tab-row {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel-soft);
 }
 
 .saved-group-summary {

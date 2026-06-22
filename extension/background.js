@@ -8,8 +8,7 @@
 'use strict';
 
 const DASHBOARD_FILE = 'index.html';
-const BOOKMARK_FOLDER_TITLE = 'Tab Out';
-const BOOKMARK_FOLDER_KEY = 'tabOutBookmarkFolderId';
+const DEFERRED_KEY = 'deferred';
 const SAVED_GROUPS_KEY = 'tabOutSavedGroups';
 const DEV_LOG_KEY = '__tabOutDevLogs';
 const UI_STATE_KEY = 'tabOutUiState';
@@ -32,7 +31,8 @@ function isUserFacingTabUrl(url) {
 }
 
 function normalizeView(value) {
-  return ['groups', 'saved', 'saved-groups', 'favorites', 'data'].includes(value)
+  if (value === 'favorites') return 'firefox-bookmarks';
+  return ['groups', 'saved-groups', 'open-tabs', 'saved', 'firefox-bookmarks', 'data'].includes(value)
     ? value
     : 'groups';
 }
@@ -132,48 +132,6 @@ function countBookmarkNodes(nodes) {
   return count;
 }
 
-function flattenBookmarks(nodes, out = []) {
-  for (const node of nodes || []) {
-    out.push(node);
-    if (node.children) flattenBookmarks(node.children, out);
-  }
-  return out;
-}
-
-async function findWritableBookmarkParent() {
-  const tree = await browser.bookmarks.getTree();
-  const rootChildren = (tree[0] && tree[0].children) || [];
-  return rootChildren.find(node => node.type === 'folder' && !node.unmodifiable) ||
-    rootChildren.find(node => node.type === 'folder') ||
-    null;
-}
-
-async function ensureBookmarkFolder() {
-  const stored = await browser.storage.local.get(BOOKMARK_FOLDER_KEY);
-  if (stored[BOOKMARK_FOLDER_KEY]) {
-    try {
-      const [folder] = await browser.bookmarks.get(stored[BOOKMARK_FOLDER_KEY]);
-      if (folder && !folder.url) return folder.id;
-    } catch {
-      // Folder was deleted. Recreate below.
-    }
-  }
-
-  const tree = await browser.bookmarks.getTree();
-  const folders = flattenBookmarks(tree).filter(node => !node.url && node.title === BOOKMARK_FOLDER_TITLE);
-  const existing = folders.find(node => node.id !== 'root________') || folders[0];
-  if (existing) {
-    await browser.storage.local.set({ [BOOKMARK_FOLDER_KEY]: existing.id });
-    return existing.id;
-  }
-
-  const parent = await findWritableBookmarkParent();
-  if (!parent) throw new Error('No writable bookmark parent found');
-  const created = await browser.bookmarks.create({ parentId: parent.id, title: BOOKMARK_FOLDER_TITLE });
-  await browser.storage.local.set({ [BOOKMARK_FOLDER_KEY]: created.id });
-  return created.id;
-}
-
 async function getActiveUserTab() {
   const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
   if (!tab || !isUserFacingTabUrl(tab.url)) {
@@ -182,24 +140,65 @@ async function getActiveUserTab() {
   return tab;
 }
 
-async function favoriteActiveTab() {
-  const tab = await getActiveUserTab();
-  const folderId = await ensureBookmarkFolder();
-  const existing = (await browser.bookmarks.getChildren(folderId))
-    .find(node => node.url === tab.url);
-
-  if (existing) {
-    devLog('popup.favorite-tab.exists', { url: tab.url });
-    return { alreadyExists: true, title: existing.title || tab.title || tab.url };
+function urlKey(url) {
+  if (Grouping && typeof Grouping.normalizeUrlKey === 'function') {
+    return Grouping.normalizeUrlKey(url);
   }
 
-  const bookmark = await browser.bookmarks.create({
-    parentId: folderId,
+  if (!url) return '';
+  try {
+    const parsed = new URL(url);
+    parsed.hash = '';
+    return parsed.href.replace(/\/$/, '');
+  } catch {
+    return String(url || '').trim();
+  }
+}
+
+async function saveItemToDeferred(item, reason) {
+  if (!item || !isUserFacingTabUrl(item.url)) return { alreadyExists: false, item: null };
+
+  const { [DEFERRED_KEY]: deferred = [] } = await browser.storage.local.get(DEFERRED_KEY);
+  const next = Array.isArray(deferred) ? deferred.map(entry => ({ ...entry })) : [];
+  const existing = next.find(entry =>
+    entry &&
+    !entry.completed &&
+    !entry.dismissed &&
+    urlKey(entry.url) === urlKey(item.url)
+  );
+
+  if (existing) {
+    devLog(`${reason}.exists`, { id: existing.id, url: existing.url });
+    return { alreadyExists: true, item: existing };
+  }
+
+  const saved = {
+    id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    url: item.url,
+    title: item.title || item.url,
+    savedAt: new Date().toISOString(),
+    completed: false,
+    dismissed: false,
+    source: item.source || reason || 'toolbar',
+  };
+  next.push(saved);
+  await browser.storage.local.set({ [DEFERRED_KEY]: next });
+  devLog(reason, { id: saved.id, url: saved.url });
+  return { alreadyExists: false, item: saved };
+}
+
+async function favoriteActiveTab() {
+  const tab = await getActiveUserTab();
+  const result = await saveItemToDeferred({
     title: tab.title || tab.url,
     url: tab.url,
-  });
-  devLog('popup.favorite-tab.created', { bookmarkId: bookmark.id, url: tab.url });
-  return { alreadyExists: false, title: bookmark.title || tab.title || tab.url };
+    source: 'toolbar',
+  }, 'popup.favorite-tab');
+  await notifyDashboard('popup.favorite-tab.saved', { url: tab.url, alreadyExists: result.alreadyExists });
+  return {
+    alreadyExists: result.alreadyExists,
+    title: (result.item && result.item.title) || tab.title || tab.url,
+  };
 }
 
 async function favoriteActiveGroup() {

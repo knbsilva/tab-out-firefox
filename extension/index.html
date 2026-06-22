@@ -17,7 +17,7 @@
 
       <label class="search-box" for="globalSearch">
         <span>Search</span>
-        <input id="globalSearch" type="search" autocomplete="off" placeholder="Tabs, sites, groups, favorites">
+        <input id="globalSearch" type="search" autocomplete="off" placeholder="Tabs, sites, groups, saved items">
       </label>
 
       <div class="topbar-actions">
@@ -41,27 +41,27 @@
     <main class="workspace">
       <aside class="sidebar" aria-label="Dashboard navigation">
         <section class="sidebar-section" aria-label="Group views">
-          <div class="sidebar-title">Group views</div>
+          <div class="sidebar-title">Groups Views</div>
           <div class="view-grid">
             <button class="view-btn active" data-action="set-view" data-view="groups">Open groups <span id="countAll">0</span></button>
-            <button class="view-btn" data-action="set-view" data-view="saved-groups">Saved group snapshots <span id="countSavedGroups">0</span></button>
+            <button class="view-btn" data-action="set-view" data-view="saved-groups">Saved groups <span id="countSavedGroups">0</span></button>
           </div>
         </section>
 
         <section class="sidebar-section" aria-label="Tab and site views">
-          <div class="sidebar-title">Tab/site views</div>
+          <div class="sidebar-title">Tab Views</div>
           <div class="view-grid">
+            <button class="view-btn" data-action="set-view" data-view="open-tabs">Open tabs <span id="countOpenTabs">0</span></button>
             <button class="view-btn" data-action="set-view" data-view="saved">Saved tabs <span id="countSaved">0</span></button>
-            <button class="view-btn" data-action="set-view" data-view="favorites">Favorites and bookmarks <span id="countFavorites">0</span></button>
+            <button class="view-btn" data-action="set-view" data-view="firefox-bookmarks">Firefox bookmarks <span id="countFirefoxBookmarks">0</span></button>
           </div>
         </section>
 
         <section class="sidebar-section" id="groupFilterSection" aria-label="Group filters">
           <div class="sidebar-title">Group filters</div>
           <div class="group-filter-row" id="groupFilterRow">
-            <button class="filter-btn active" data-action="set-filter" data-filter="all">All groups <span id="countAllFilter">0</span></button>
             <button class="filter-btn" data-action="set-filter" data-filter="firefox">Firefox groups <span id="countFirefox">0</span></button>
-            <button class="filter-btn" data-action="set-filter" data-filter="smart">Smart groups <span id="countSmart">0</span></button>
+            <button class="filter-btn" data-action="set-filter" data-filter="smart">Tab Out groups <span id="countSmart">0</span></button>
           </div>
         </section>
 
@@ -69,7 +69,13 @@
           <div class="sidebar-title">Tab filters in groups</div>
           <div class="group-filter-row">
             <button class="filter-btn" data-action="set-filter" data-filter="duplicates">Duplicate tabs <span id="countDuplicates">0</span></button>
-            <button class="filter-btn" data-action="set-filter" data-filter="bookmarked">Open favorited tabs <span id="countBookmarked">0</span></button>
+          </div>
+        </section>
+
+        <section class="sidebar-section" id="listFilterSection" aria-label="Filters in tabs" hidden>
+          <div class="sidebar-title">Filters in Tabs</div>
+          <div class="group-filter-row">
+            <button class="filter-btn" data-action="set-tab-filter" data-tab-filter="duplicates">Duplicate tabs <span id="countTabDuplicates">0</span></button>
           </div>
         </section>
 
@@ -103,6 +109,18 @@
           </div>
         </section>
 
+        <section class="content-panel" data-view-panel="open-tabs" aria-label="Open tabs" hidden>
+          <div class="panel-header">
+            <div>
+              <h2>Open tabs</h2>
+              <p>All open tabs as individual sites, outside the group layout.</p>
+            </div>
+            <span class="panel-count" id="openTabCount">0</span>
+          </div>
+          <div class="tab-view-list" id="openTabsList"></div>
+          <div class="empty-inline" id="openTabsEmpty">No open web tabs.</div>
+        </section>
+
         <section class="content-panel" data-view-panel="saved" aria-label="Saved tabs" hidden>
           <div class="panel-header">
             <div>
@@ -133,22 +151,18 @@
           <div class="empty-inline" id="savedGroupEmpty">No saved groups yet.</div>
         </section>
 
-        <section class="content-panel" data-view-panel="favorites" aria-label="Favorites" hidden>
+        <section class="content-panel" data-view-panel="firefox-bookmarks" aria-label="Firefox bookmarks" hidden>
           <div class="panel-header">
             <div>
-              <h2>Favorites and bookmarks</h2>
-              <p>Tab Out favorites are copies in the Tab Out folder. Firefox bookmarks are your browser bookmarks.</p>
+              <h2>Firefox bookmarks</h2>
+              <p>Browser bookmarks from Firefox. Copying them to Tab Out creates saved tabs and does not change Firefox bookmarks.</p>
             </div>
             <span class="panel-count" id="bookmarkCount">0</span>
           </div>
-          <div class="segmented-control" aria-label="Favorites mode">
-            <button class="active" data-action="set-bookmark-mode" data-bookmark-mode="tabout">Tab Out favorites</button>
-            <button data-action="set-bookmark-mode" data-bookmark-mode="all">Firefox bookmarks</button>
-          </div>
-          <button class="subtle-btn compact-action" id="migrateBookmarksButton" data-action="migrate-bookmarks">Copy current Firefox results to Tab Out</button>
-          <input type="search" id="bookmarkSearch" class="compact-input" placeholder="Search Tab Out favorites">
+          <button class="subtle-btn compact-action" id="migrateBookmarksButton" data-action="migrate-bookmarks">Copy current Firefox results to Saved tabs</button>
+          <input type="search" id="bookmarkSearch" class="compact-input" placeholder="Search Firefox bookmarks">
           <div class="bookmark-list" id="bookmarkList"></div>
-          <div class="empty-inline" id="bookmarkEmpty">No Tab Out favorites yet.</div>
+          <div class="empty-inline" id="bookmarkEmpty">No Firefox bookmarks found.</div>
         </section>
 
         <section class="content-panel" data-view-panel="data" aria-label="Tab Out data" hidden>
