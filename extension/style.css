@@ -624,6 +624,10 @@ svg {
   grid-template-columns: minmax(0, 1fr) auto;
 }
 
+.saved-row {
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+}
+
 .archive-row {
   grid-template-columns: minmax(0, 1fr) auto;
 }
@@ -674,6 +678,19 @@ svg {
   display: flex;
   align-items: center;
   gap: 4px;
+}
+
+.bookmark-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
+.compact-save-btn {
+  min-height: 30px;
+  padding: 5px 8px;
+  white-space: nowrap;
 }
 
 .saved-group-tabs {

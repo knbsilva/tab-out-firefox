@@ -34,7 +34,16 @@
   }
 
   function normalizeUrlKey(url) {
-    return String(url || '').trim();
+    const raw = String(url || '').trim();
+    if (!raw) return '';
+
+    try {
+      const parsed = new URL(raw);
+      parsed.hash = '';
+      return parsed.href.replace(/\/$/, '');
+    } catch {
+      return raw.replace(/#.*$/, '').replace(/\/$/, '');
+    }
   }
 
   function parseUrl(url) {
@@ -204,6 +213,20 @@
     return group;
   }
 
+  function isRenderableGroup(group, options = {}) {
+    if (!group || !Array.isArray(group.tabs)) return false;
+    if (group.type === 'firefox') return group.tabs.length > 0;
+
+    const minSmartTabs = Number.isInteger(options.minSmartTabs)
+      ? options.minSmartTabs
+      : 2;
+    return group.type === 'smart' && group.tabs.length >= minSmartTabs;
+  }
+
+  function filterRenderableGroups(groups, options = {}) {
+    return (Array.isArray(groups) ? groups : []).filter(group => isRenderableGroup(group, options));
+  }
+
   function groupTabs(rawTabs, firefoxGroups, options) {
     const opts = options || {};
     const extensionUrl = opts.extensionUrl || '';
@@ -314,12 +337,14 @@
   return {
     TAB_GROUP_NONE,
     DEFAULT_LANDING_PAGE_PATTERNS,
+    filterRenderableGroups,
     friendlyDomain,
     getDuplicateInfo,
     groupTabs,
     hostnameFromUrl,
     isLandingPage,
     isLocalDevUrl,
+    isRenderableGroup,
     isUserFacingTabUrl,
     normalizeTab,
     normalizeUrlKey,

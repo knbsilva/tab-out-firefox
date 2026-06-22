@@ -4,6 +4,7 @@
 
 const {
   TAB_GROUP_NONE,
+  filterRenderableGroups,
   groupTabs,
   isUserFacingTabUrl,
   normalizeUrlKey,
@@ -33,14 +34,6 @@ const GROUP_ALIASES_KEY = 'tabOutGroupAliases';
 const UI_STATE_KEY = 'tabOutUiState';
 const DEV_LOG_KEY = '__tabOutDevLogs';
 const DEV_LOG_LIMIT = 300;
-
-const ICONS = {
-  star: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 2.76 5.59 6.17.9-4.47 4.35 1.06 6.14L12 17.08l-5.52 2.9 1.06-6.14-4.47-4.35 6.17-.9L12 3Z"/></svg>',
-  bookmark: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 4.75A2.75 2.75 0 0 1 8.75 2h6.5A2.75 2.75 0 0 1 18 4.75V21l-6-3.4L6 21V4.75Z"/></svg>',
-  close: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>',
-  focus: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 19 14-14M9 5h10v10"/></svg>',
-  group: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7.5A2.5 2.5 0 0 1 6.5 5h11A2.5 2.5 0 0 1 20 7.5v9a2.5 2.5 0 0 1-2.5 2.5h-11A2.5 2.5 0 0 1 4 16.5v-9Zm3-5h10"/></svg>',
-};
 
 const state = {
   allTabs: [],
@@ -120,6 +113,12 @@ function createActionButton(action, text, className, dataset = {}, title = '') {
 
 function createBadge(className, text) {
   return createNode('span', className, text);
+}
+
+function createDuplicateBadge(count, key) {
+  const badge = createBadge('duplicate-badge', `${count}x`);
+  if (key) badge.title = `Duplicate key: ${key}`;
+  return badge;
 }
 
 function normalizeView(value) {
@@ -455,35 +454,6 @@ async function saveItemToDeferred(item, reason) {
   return saved;
 }
 
-async function dismissSavedByUrl(url, reason) {
-  const { [DEFERRED_KEY]: deferred = [] } = await browser.storage.local.get(DEFERRED_KEY);
-  const next = Array.isArray(deferred) ? deferred.map(entry => ({ ...entry })) : [];
-  const item = next.find(entry => !entry.dismissed && !entry.completed && urlKey(entry.url) === urlKey(url));
-  if (!item) return false;
-  item.dismissed = true;
-  item.dismissedAt = new Date().toISOString();
-  await persistDeferred(next, reason || 'saved.dismiss-url');
-  devLog(reason || 'saved.dismiss-url', { id: item.id, url });
-  return true;
-}
-
-async function toggleSavedForTab(tab) {
-  const saved = savedStatusForUrl(tab.url);
-
-  if (saved) {
-    await dismissSavedByUrl(tab.url, 'saved.toggle-remove');
-    showToast('Removed from Saved tabs');
-    return;
-  }
-
-  await saveItemToDeferred({
-    title: tab.title || tab.url,
-    url: tab.url,
-    source: 'star',
-  }, 'saved.toggle-add');
-  showToast('Saved tab/site');
-}
-
 async function migrateVisibleBookmarksToTabOut() {
   const queryResults = getFirefoxBookmarkBaseItems();
   const candidates = queryResults.filter(bookmark =>
@@ -535,6 +505,57 @@ async function closeTabsByIds(tabIds) {
   if (ids.length === 0) return;
   await browser.tabs.remove(ids);
   devLog('tabs.close', { count: ids.length, tabIds: ids });
+}
+
+async function getLiveTabIdsForGroup(group) {
+  if (!group) return [];
+
+  if (group.type === 'firefox' && Number.isInteger(group.firefoxGroupId)) {
+    try {
+      const query = { groupId: group.firefoxGroupId };
+      if (Number.isInteger(group.windowId)) query.windowId = group.windowId;
+      const tabs = await browser.tabs.query(query);
+      return tabs
+        .filter(tab => isUserFacingTabUrl(tab.url || tab.pendingUrl))
+        .map(tab => tab.id)
+        .filter(id => Number.isInteger(id));
+    } catch (error) {
+      devLog('tabGroups.live-query.failed', {
+        groupId: group.id,
+        firefoxGroupId: group.firefoxGroupId,
+        message: error.message,
+      });
+    }
+  }
+
+  return group.tabs.map(tab => tab.id).filter(id => Number.isInteger(id));
+}
+
+async function closeGroup(group) {
+  devLog('group.close.start', {
+    groupId: group.id,
+    type: group.type,
+    firefoxGroupId: group.firefoxGroupId,
+    renderedTabs: group.tabs.length,
+  });
+
+  try {
+    const tabIds = await getLiveTabIdsForGroup(group);
+    if (tabIds.length === 0) {
+      devLog('group.close.no-live-tabs', { groupId: group.id, type: group.type });
+      showToast('No live tabs found for this group');
+      return false;
+    }
+
+    await closeTabsByIds(tabIds);
+    devLog('group.close.success', { groupId: group.id, type: group.type, closed: tabIds.length });
+    showToast(`Closed ${tabIds.length} tab${tabIds.length !== 1 ? 's' : ''}`);
+    return true;
+  } catch (error) {
+    devLog('group.close.failed', { groupId: group.id, type: group.type, message: error.message });
+    showToast('Could not close group');
+    return false;
+  }
 }
 
 async function createFirefoxGroup(groupId) {
@@ -597,8 +618,12 @@ async function saveGroupSnapshot(groupId, options = {}) {
   });
 
   if (options.closeAfter) {
-    await closeTabsByIds(group.tabs.map(tab => tab.id));
-    showToast(`Saved and closed ${snapshot.tabs.length} tabs`);
+    const liveTabIds = await getLiveTabIdsForGroup(group);
+    if (liveTabIds.length > 0) await closeTabsByIds(liveTabIds);
+    devLog('savedGroups.save-close.closed', { groupId, snapshotId: snapshot.id, closed: liveTabIds.length });
+    showToast(liveTabIds.length > 0
+      ? `Saved and closed ${liveTabIds.length} tab${liveTabIds.length !== 1 ? 's' : ''}`
+      : 'Saved group; no live tabs found to close');
   } else {
     showToast(`Saved group: ${snapshot.title}`);
   }
@@ -713,6 +738,26 @@ async function clearArchive() {
   showToast(`Cleared ${result.removed} archived item${result.removed !== 1 ? 's' : ''}`);
 }
 
+async function deleteFirefoxBookmark(bookmarkId) {
+  const bookmark = state.allBookmarks.find(item => item.id === bookmarkId);
+  if (!bookmark) return false;
+
+  const confirmed = window.confirm(`Delete Firefox bookmark "${bookmark.title || bookmark.url}"? Saved tabs in Tab Out will not be changed.`);
+  if (!confirmed) return false;
+
+  devLog('bookmark.delete.start', { bookmarkId, url: bookmark.url });
+  try {
+    await browser.bookmarks.remove(bookmarkId);
+    devLog('bookmark.delete.success', { bookmarkId, url: bookmark.url });
+    showToast('Firefox bookmark deleted');
+    return true;
+  } catch (error) {
+    devLog('bookmark.delete.failed', { bookmarkId, url: bookmark.url, message: error.message });
+    showToast('Could not delete Firefox bookmark');
+    return false;
+  }
+}
+
 function pickGroupColor(kind) {
   if (kind === 'homepages') return 'blue';
   if (kind === 'local-dev') return 'green';
@@ -726,15 +771,21 @@ async function closeDuplicates(groupId) {
   if (!group) return;
 
   const toClose = [];
-  for (const url of group.duplicates.duplicateUrls) {
-    const matching = group.tabs.filter(tab => tab.url === url);
+  for (const key of group.duplicates.duplicateUrls) {
+    const matching = group.tabs.filter(tab => urlKey(tab.url) === key);
     const keep = matching.find(tab => tab.active) || matching[0];
     for (const tab of matching) {
       if (tab.id !== keep.id) toClose.push(tab.id);
     }
   }
 
+  devLog('duplicates.close.start', {
+    groupId,
+    duplicateExtras: toClose.length,
+    duplicateKeys: group.duplicates.duplicateUrls.slice(0, 10),
+  });
   await closeTabsByIds(toClose);
+  devLog('duplicates.close.success', { groupId, closed: toClose.length });
   showToast(`Closed ${toClose.length} duplicate${toClose.length !== 1 ? 's' : ''}`);
 }
 
@@ -752,10 +803,14 @@ function buildGroups() {
     customGroups,
   });
   state.groups = applyGroupAliases(groups, state.groupAliases);
+  const renderableGroups = getRenderableGroups();
   devLog('groups.build', {
     groups: state.groups.length,
+    renderableGroups: renderableGroups.length,
     firefox: state.groups.filter(group => group.type === 'firefox').length,
     smart: state.groups.filter(group => group.type === 'smart').length,
+    renderableFirefox: renderableGroups.filter(group => group.type === 'firefox').length,
+    renderableSmart: renderableGroups.filter(group => group.type === 'smart').length,
   });
 }
 
@@ -787,6 +842,7 @@ async function refreshDashboard(reason = 'manual') {
       reason,
       tabs: state.realTabs.length,
       groups: state.groups.length,
+      renderableGroups: getRenderableGroups().length,
       bookmarks: state.allBookmarks.length,
       savedGroups: state.savedGroups.length,
     });
@@ -801,7 +857,7 @@ async function refreshDashboard(reason = 'manual') {
 
 function filterGroups() {
   const query = (state.ui.query || '').trim().toLowerCase();
-  let groups = [...state.groups];
+  let groups = getRenderableGroups();
 
   if (state.ui.groupFilter === 'firefox') groups = groups.filter(group => group.type === 'firefox');
   if (state.ui.groupFilter === 'smart') groups = groups.filter(group => group.type === 'smart');
@@ -827,6 +883,23 @@ function filterGroups() {
       group.label.toLowerCase().includes(query) ||
       group.sites.some(site => site.toLowerCase().includes(query))
     );
+}
+
+function getRenderableGroups() {
+  return filterRenderableGroups(state.groups, { minSmartTabs: 2 });
+}
+
+function getRenderableGroupForTab(tab) {
+  if (!tab) return null;
+  return getRenderableGroups().find(group => group.tabs.some(item => item.id === tab.id)) || null;
+}
+
+function getGroupLabelForTab(tab) {
+  const group = getRenderableGroupForTab(tab);
+  if (!group) return '';
+  return group.type === 'firefox'
+    ? `Firefox group: ${group.label}`
+    : `Tab Out group: ${group.label}`;
 }
 
 function filterSavedGroupsForDisplay() {
@@ -863,6 +936,11 @@ function filterSavedGroupsForDisplay() {
 function getDuplicateUrlKeys(items) {
   const counts = getUrlCounts(items);
   return new Set(Object.entries(counts).filter(([, count]) => count > 1).map(([key]) => key));
+}
+
+function getDuplicateExtras(items) {
+  const counts = getUrlCounts(items);
+  return Object.values(counts).reduce((sum, count) => sum + Math.max(0, count - 1), 0);
 }
 
 function getUrlCounts(items) {
@@ -933,7 +1011,7 @@ function renderDashboard(reason) {
 }
 
 function renderStats(reason) {
-  const groups = state.groups;
+  const groups = getRenderableGroups();
   const groupFilterBase = state.ui.view === 'saved-groups' ? state.savedGroups : groups;
   const firefoxCount = state.ui.view === 'saved-groups'
     ? groupFilterBase.filter(group => group.source === 'firefox').length
@@ -942,9 +1020,9 @@ function renderStats(reason) {
     ? groupFilterBase.filter(group => group.source === 'smart').length
     : groupFilterBase.filter(group => group.type === 'smart').length;
   const duplicateGroups = state.ui.view === 'saved-groups'
-    ? groupFilterBase.filter(group => getDuplicateUrlKeys(group.tabs).size > 0).length
-    : groupFilterBase.filter(group => group.duplicates.duplicateExtras > 0).length;
-  const duplicateTabItems = filterDuplicateItems(getCurrentTabBaseItems()).length;
+    ? groupFilterBase.reduce((sum, group) => sum + getDuplicateExtras(group.tabs), 0)
+    : groupFilterBase.reduce((sum, group) => sum + group.duplicates.duplicateExtras, 0);
+  const duplicateTabItems = getDuplicateExtras(getCurrentTabBaseItems());
 
   $('statTabs').textContent = state.realTabs.length;
   $('statGroups').textContent = groups.length;
@@ -1022,6 +1100,7 @@ function renderGroups() {
 
   if (groups.length === 0) {
     clearElement(list);
+    renderGroupsEmptyState(empty);
     empty.hidden = false;
     return;
   }
@@ -1030,6 +1109,21 @@ function renderGroups() {
   clearElement(list);
   for (const group of groups) {
     list.appendChild(renderGroupNode(group));
+  }
+}
+
+function renderGroupsEmptyState(empty) {
+  const title = empty.querySelector('strong');
+  const detail = empty.querySelector('span');
+  const filtersActive = state.ui.groupFilter !== 'all' || state.ui.tabFilter === 'duplicates' || !!state.ui.query;
+
+  if (title) {
+    title.textContent = filtersActive ? 'No groups match the current filters' : 'No open tab groups';
+  }
+  if (detail) {
+    detail.textContent = filtersActive
+      ? 'Clear the group filters or search to see other Firefox and Tab Out groups.'
+      : 'Open Firefox groups or at least two related tabs for Tab Out groups to appear here.';
   }
 }
 
@@ -1099,10 +1193,10 @@ function smartKindLabel(kind) {
 function renderTabRowNode(tab, group) {
   const saved = savedStatusForUrl(tab.url);
   const bookmark = bookmarkStatusForUrl(tab.url);
-  const count = group.duplicates.urlCounts[urlKey(tab.url)] || 1;
+  const duplicateKey = urlKey(tab.url);
+  const count = group.duplicates.urlCounts[duplicateKey] || 1;
   const title = tabDisplayTitle(tab);
   const site = siteFromUrl(tab.url);
-  const saveTitle = saved ? 'Remove from Saved tabs' : 'Save tab/site to Saved tabs';
   const row = createNode('div', `tab-row ${tab.active ? 'active-tab' : ''}`);
   row.dataset.tabId = String(tab.id);
 
@@ -1114,14 +1208,13 @@ function renderTabRowNode(tab, group) {
   const badges = createNode('div', 'tab-badges');
   if (tab.pinned) badges.appendChild(createBadge('meta-badge', 'pinned'));
   if (tab.discarded) badges.appendChild(createBadge('meta-badge', 'discarded'));
-  if (count > 1) badges.appendChild(createBadge('duplicate-badge', `${count}x`));
+  if (count > 1) badges.appendChild(createDuplicateBadge(count, duplicateKey));
   if (saved) badges.appendChild(createBadge('meta-badge', 'saved'));
   if (bookmark.bookmarked) badges.appendChild(createBadge('meta-badge', 'Firefox bookmark'));
   row.appendChild(badges);
 
   const actions = createNode('div', 'tab-actions');
-  actions.appendChild(createActionButton('toggle-bookmark', 'Star', `icon-only ${saved ? 'is-bookmarked' : ''}`, { tabId: tab.id }, saveTitle));
-  actions.appendChild(createActionButton('save-later', 'Save', 'icon-only', { tabId: tab.id }, 'Save for later and close'));
+  actions.appendChild(createActionButton('save-later', 'Save + close', 'subtle-btn compact-save-btn', { tabId: tab.id }, 'Save to Saved tabs and close'));
   actions.appendChild(createActionButton('focus-tab', 'Go', 'icon-only', { tabId: tab.id }, 'Focus tab'));
   actions.appendChild(createActionButton('close-tab', 'X', 'icon-only danger', { tabId: tab.id }, 'Close tab'));
   row.appendChild(actions);
@@ -1157,6 +1250,8 @@ function renderOpenTabNode(tab, duplicateCount) {
   row.dataset.tabId = String(tab.id);
   const saved = savedStatusForUrl(tab.url);
   const bookmark = bookmarkStatusForUrl(tab.url);
+  const groupLabel = getGroupLabelForTab(tab);
+  const duplicateKey = urlKey(tab.url);
 
   const main = createActionButton('focus-tab', '', 'tab-main', { tabId: tab.id }, tab.url);
   main.appendChild(createNode('span', 'tab-title', tabDisplayTitle(tab)));
@@ -1166,14 +1261,14 @@ function renderOpenTabNode(tab, duplicateCount) {
   const badges = createNode('div', 'tab-badges');
   if (tab.pinned) badges.appendChild(createBadge('meta-badge', 'pinned'));
   if (tab.discarded) badges.appendChild(createBadge('meta-badge', 'discarded'));
-  if (duplicateCount > 1) badges.appendChild(createBadge('duplicate-badge', `${duplicateCount}x`));
+  if (duplicateCount > 1) badges.appendChild(createDuplicateBadge(duplicateCount, duplicateKey));
+  if (groupLabel) badges.appendChild(createBadge('meta-badge', groupLabel));
   if (saved) badges.appendChild(createBadge('meta-badge', 'saved'));
   if (bookmark.bookmarked) badges.appendChild(createBadge('meta-badge', 'Firefox bookmark'));
   row.appendChild(badges);
 
   const actions = createNode('div', 'tab-actions');
-  actions.appendChild(createActionButton('toggle-bookmark', 'Star', `icon-only ${saved ? 'is-bookmarked' : ''}`, { tabId: tab.id }, saved ? 'Remove from Saved tabs' : 'Save tab/site to Saved tabs'));
-  actions.appendChild(createActionButton('save-later', 'Save', 'icon-only', { tabId: tab.id }, 'Save for later and close'));
+  actions.appendChild(createActionButton('save-later', 'Save + close', 'subtle-btn compact-save-btn', { tabId: tab.id }, 'Save to Saved tabs and close'));
   actions.appendChild(createActionButton('focus-tab', 'Go', 'icon-only', { tabId: tab.id }, 'Focus tab'));
   actions.appendChild(createActionButton('close-tab', 'X', 'icon-only danger', { tabId: tab.id }, 'Close tab'));
   row.appendChild(actions);
@@ -1183,6 +1278,7 @@ function renderOpenTabNode(tab, duplicateCount) {
 function renderSavedPanel() {
   const baseActive = getSavedTabBaseItems();
   const active = filterListItems(baseActive);
+  const activeCounts = getUrlCounts(baseActive);
   const archived = state.deferredArchived;
   const list = $('deferredList');
   const empty = $('deferredEmpty');
@@ -1204,7 +1300,7 @@ function renderSavedPanel() {
     empty.hidden = true;
     clearElement(list);
     for (const item of active) {
-      list.appendChild(renderSavedItemNode(item));
+      list.appendChild(renderSavedItemNode(item, activeCounts[urlKey(item.url)] || 1));
     }
   }
 
@@ -1285,7 +1381,7 @@ function renderSavedGroupNode(snapshot) {
   return row;
 }
 
-function renderSavedItemNode(item) {
+function renderSavedItemNode(item, duplicateCount = 1) {
   const row = createNode('div', 'saved-row');
   row.dataset.deferredId = item.id;
   row.appendChild(createActionButton('check-deferred', '', 'check-btn', { deferredId: item.id }, 'Mark done'));
@@ -1297,6 +1393,7 @@ function renderSavedItemNode(item) {
   link.title = item.url || '';
   row.appendChild(link);
 
+  if (duplicateCount > 1) row.appendChild(createDuplicateBadge(duplicateCount, urlKey(item.url)));
   row.appendChild(createActionButton('dismiss-deferred', 'X', 'icon-only danger', { deferredId: item.id }, 'Dismiss'));
   return row;
 }
@@ -1322,6 +1419,7 @@ function renderBookmarksPanel() {
   const migrateButton = $('migrateBookmarksButton');
   const baseBookmarks = getFirefoxBookmarkBaseItems();
   const bookmarks = filterListItems(baseBookmarks);
+  const bookmarkCounts = getUrlCounts(baseBookmarks);
   const migrationCandidates = baseBookmarks.filter(bookmark =>
     isUserFacingTabUrl(bookmark.url) &&
     !savedStatusForUrl(bookmark.url)
@@ -1346,11 +1444,11 @@ function renderBookmarksPanel() {
   empty.hidden = true;
   clearElement(list);
   for (const bookmark of bookmarks) {
-    list.appendChild(renderBookmarkNode(bookmark));
+    list.appendChild(renderBookmarkNode(bookmark, bookmarkCounts[urlKey(bookmark.url)] || 1));
   }
 }
 
-function renderBookmarkNode(bookmark) {
+function renderBookmarkNode(bookmark, duplicateCount = 1) {
   const row = createNode('div', 'bookmark-row');
   row.dataset.bookmarkId = bookmark.id;
   const saved = savedStatusForUrl(bookmark.url);
@@ -1361,9 +1459,13 @@ function renderBookmarkNode(bookmark) {
   main.appendChild(createNode('small', '', `${siteFromUrl(bookmark.url)}${folderPath}`));
   row.appendChild(main);
 
+  const actions = createNode('div', 'bookmark-actions');
+  if (duplicateCount > 1) actions.appendChild(createDuplicateBadge(duplicateCount, urlKey(bookmark.url)));
   const copyButton = createActionButton('copy-bookmark-to-saved', saved ? 'Saved' : 'Save', 'subtle-btn', { bookmarkId: bookmark.id }, saved ? 'Already in Saved tabs' : 'Copy to Saved tabs');
   copyButton.disabled = !!saved;
-  row.appendChild(copyButton);
+  actions.appendChild(copyButton);
+  actions.appendChild(createActionButton('delete-firefox-bookmark', 'Delete', 'danger-btn', { bookmarkId: bookmark.id }, 'Delete Firefox bookmark'));
+  row.appendChild(actions);
   return row;
 }
 
@@ -1383,9 +1485,11 @@ async function handleClick(event) {
     }
 
     if (action === 'set-view') {
+      const previousView = state.ui.view;
       state.ui.view = normalizeView(actionEl.dataset.view);
       history.replaceState(null, '', `#view=${state.ui.view}`);
       await persistUiState();
+      devLog('ui.view.change', { from: previousView, to: state.ui.view });
       renderDashboard('view');
       return;
     }
@@ -1398,6 +1502,11 @@ async function handleClick(event) {
         state.ui.groupFilter = state.ui.groupFilter === filter ? 'all' : filter;
       }
       await persistUiState();
+      devLog('ui.group-filter.change', {
+        requested: filter,
+        groupFilter: state.ui.groupFilter,
+        tabFilter: state.ui.tabFilter,
+      });
       renderDashboard('filter');
       return;
     }
@@ -1406,6 +1515,7 @@ async function handleClick(event) {
       const filter = actionEl.dataset.tabFilter || '';
       state.ui.listFilter = state.ui.listFilter === filter ? '' : filter;
       await persistUiState();
+      devLog('ui.tab-filter.change', { requested: filter, listFilter: state.ui.listFilter });
       renderDashboard('tab-filter');
       return;
     }
@@ -1447,32 +1557,32 @@ async function handleClick(event) {
       return;
     }
 
-    if (action === 'toggle-bookmark') {
-      const tab = getTabById(tabId);
-      if (!tab) return;
-      await toggleSavedForTab(tab);
-      scheduleRefresh('action.toggle-bookmark');
-      return;
-    }
-
     if (action === 'close-group') {
       const group = state.groups.find(item => item.id === groupId);
       if (!group) return;
-      await closeTabsByIds(group.tabs.map(tab => tab.id));
-      showToast(`Closed ${group.tabs.length} tabs`);
-      scheduleRefresh('action.close-group');
+      try {
+        await closeGroup(group);
+      } finally {
+        scheduleRefresh('action.close-group');
+      }
       return;
     }
 
     if (action === 'create-firefox-group') {
-      await createFirefoxGroup(groupId);
-      scheduleRefresh('action.create-firefox-group');
+      try {
+        await createFirefoxGroup(groupId);
+      } finally {
+        scheduleRefresh('action.create-firefox-group');
+      }
       return;
     }
 
     if (action === 'rename-group') {
-      await renameGroup(groupId);
-      scheduleRefresh('action.rename-group');
+      try {
+        await renameGroup(groupId);
+      } finally {
+        scheduleRefresh('action.rename-group');
+      }
       return;
     }
 
@@ -1483,14 +1593,20 @@ async function handleClick(event) {
     }
 
     if (action === 'save-close-group') {
-      await saveGroupSnapshot(groupId, { closeAfter: true });
-      scheduleRefresh('action.save-close-group');
+      try {
+        await saveGroupSnapshot(groupId, { closeAfter: true });
+      } finally {
+        scheduleRefresh('action.save-close-group');
+      }
       return;
     }
 
     if (action === 'close-duplicates') {
-      await closeDuplicates(groupId);
-      scheduleRefresh('action.close-duplicates');
+      try {
+        await closeDuplicates(groupId);
+      } finally {
+        scheduleRefresh('action.close-duplicates');
+      }
       return;
     }
 
@@ -1566,6 +1682,12 @@ async function handleClick(event) {
       }, 'saved.copy-bookmark');
       showToast('Copied to Saved tabs');
       scheduleRefresh('action.copy-bookmark');
+      return;
+    }
+
+    if (action === 'delete-firefox-bookmark') {
+      const deleted = await deleteFirefoxBookmark(actionEl.dataset.bookmarkId);
+      if (deleted) scheduleRefresh('action.delete-firefox-bookmark');
       return;
     }
 
